@@ -36,7 +36,6 @@ class MachineLocalConfigError(RuntimeError):
     """machine.local.json is present but malformed; runtime entry points must fail closed."""
 
 
-PRIVATE_CONFIG_ENV = "BIGQMT_PRIVATE_CONFIG_FILE"
 _PRIVATE_CONFIG_KEY_RE = re.compile(
     r"(?:password|passwd|secret|token|credential|authorization|private[_-]?key|api[_-]?key)",
     re.IGNORECASE,
@@ -110,6 +109,16 @@ def _load_private_file(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_private_config(path: Path) -> dict[str, Any]:
+    """Load and validate an explicit NAS/private overlay.
+
+    This function is intentionally explicit. Runtime entry points call only
+    :func:`load_machine_local`, so a NAS outage never prevents a local tray
+    from starting.
+    """
+    return _load_private_file(Path(path).expanduser())
+
+
 def load_machine_local(root: Path | None = None) -> dict[str, Any]:
     """Read the machine-local override file.
 
@@ -130,13 +139,9 @@ def load_machine_local(root: Path | None = None) -> dict[str, Any]:
         if not isinstance(local, dict):
             raise MachineLocalConfigError("machine.local.json must be a JSON object")
 
-    private = local.get("private_config") if isinstance(local.get("private_config"), dict) else {}
-    private_file = str(private.get("file") or os.environ.get(PRIVATE_CONFIG_ENV, "")).strip()
-    if not private_file:
-        return local
-    remote = _load_private_file(Path(private_file).expanduser())
-    # The host-local file wins for emergency overrides; NAS supplies portable defaults.
-    return _deep_merge(remote, local)
+    # NAS is a bootstrap/update source only. Once written locally, the tray and
+    # every runtime loader must not open the share during startup.
+    return local
 
 
 def machine_environment(machine: dict[str, Any], profile: str) -> dict[str, Any]:

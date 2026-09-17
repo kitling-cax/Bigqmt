@@ -2,8 +2,9 @@
   "schema_version": 1,
   "comment": "Example only. Copy to machine.local.json and adjust locally; do not commit the copied file.",
   "private_config": {
-    "file": "\\\\nas.example\\bigqmt-private\\hosts\\HOST_ID.json",
-    "comment": "Optional non-secret NAS overlay. Never place passwords, tokens, Fact Secrets or execution Keys here."
+    "source": "\\\\nas.example\\bigqmt-private\\hosts\\HOST_ID.json",
+    "runtime_reads_nas": false,
+    "comment": "Metadata written by bootstrap_private_config.py. Runtime uses the local cache only."
   },
   "data_directory": "C:/BigQMT/work/kitling_bigqmt/runtime_data",
   "coordinator": {
