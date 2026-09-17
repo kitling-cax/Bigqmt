@@ -835,3 +835,9 @@ SSH 只读预检确认：`.121` 可达，现有 `kitling-bigqmt-coordinator.serv
 `.125` 的复核正确指出 0.2.0 配置把 Fact Secret 放在包内，而 `manage_fact_identity.py` 按设计拒绝写入自己的项目树。因此 0.2.0 标记为不可运行并保留作审计，不覆盖或删除。新的不可变 `0.2.1` 将两台主机的 Secret 路径改为本机 `C:\ProgramData\Kitling\BigQMT\host-facts\<key-id>.json`；包内仍保留 SQLite WAL Outbox、日志和非敏感代码，但不再有 `secrets/` 目录。
 
 `.125` 新 staging 为 `\\192.0.2.125\kitling_QMT_work\kitling_bigqmt\BigQMT_Host_125_0.2.1`，交接文件为 `125_portable_host_021_handoff_20260917.md`；NAS 新源为 `releases/portable_host/candidate/0.2.1/`。三份目标的 checksum 及外部 Secret 路径均已验证。不得在 Git Bash/WSL 以 `ls/find` 判断 Windows UNC 发布路径；使用 Windows PowerShell。无 Coordinator trust enrollment、无订单、无 lease、无 `18443` 改动。详见 `docs/156_portable_host_bundle_021_secret_path_fix_2026-09-17.md`。
+
+## 2026-09-17 20:10 · GitHub 多主机源码基线
+
+`.105` 的 `kitling_bigqmt` 已从非 Git 目录初始化并成功推送到 `kitling-cax/Bigqmt` 的 `main`：基线提交 `8356e02`，随后提交 `988cdd5` 增加 GitHub Actions、协作规则和 `.125/.113` VS Code/Claude 接入说明。`.105` 是唯一集成/发布机；`.125/.113` 后续各自在 `host/125/*`、`host/113/*` 分支本机编译验证、提交 PR，再由 `.105` 合并并发布 NAS。
+
+`.github/workflows/source-ci.yml` 只执行 Python 单元测试、facts-only Host Tray 编译、Coordinator Docker 镜像构建和受限路径检查；不连接 QMT/Redis/Coordinator，不部署容器，不下单。Git 忽略 machine local config、Secret、授权 Key、QMT 数据、SQLite/WAL、日志、EXE 和 NAS release。待仓库管理员在 GitHub 保护 `main`（PR + CI、禁止 force push/删除）。详见 `docs/157_github_multi_host_source_control_baseline_2026-09-17.md`。

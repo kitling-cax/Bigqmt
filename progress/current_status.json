@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-17T15:25:00+08:00",
+  "updated_at": "2026-09-17T20:10:00+08:00",
   "environment": "simulation",
   "stage": "P12_SIMULATION_ACCEPTANCE",
   "stage_status": "P12_SIMULATION_ACCEPTANCE_V1_1_15_ORDER_GATE_OPEN",
@@ -71,6 +71,18 @@
     "endpoint": "Shadow facts-only http://192.0.2.121:18666/api/v1/facts/ingest",
     "orders_enabled": false,
     "evidence": "docs/155_portable_host_bundle_020_release_2026-09-17.md; docs/156_portable_host_bundle_021_secret_path_fix_2026-09-17.md; checksums.sha256 verified locally, on .125 staging and on NAS; py -3.12 -m pytest -q: 268 passed in 21.18s"
+  },
+  "github_multi_host_source_control": {
+    "status": "BASELINE_PUBLISHED_MAIN_105_INTEGRATOR",
+    "repository": "https://github.com/kitling-cax/Bigqmt.git",
+    "main_baseline_commit": "8356e02a7f3eec3bd232811723708964e74e3025",
+    "ci_workflow_commit": "988cdd5",
+    "roles": {"192.0.2.105": "development_integration_release", "192.0.2.125": "future_primary_runtime_host_branch_and_pr", "198.51.100.113": "future_standby_runtime_host_branch_and_pr", "192.0.2.121": "coordinator_container_only"},
+    "source_policy": "GitHub holds source/templates/docs/tests; NAS holds immutable built packages/reports/backups; local machine config, secrets, authorization keys, QMT data, databases, logs and binaries are excluded",
+    "ci_scope": "unit tests, portable Host Tray compile and Coordinator container image build only; no QMT, Redis, Coordinator deployment, lease or order action",
+    "pending_admin_action": "protect main with pull-request and BigQMT source CI requirements",
+    "orders_enabled": false,
+    "evidence": "CONTRIBUTING.md; .github/workflows/source-ci.yml; instructions/git/125_vscode_claude_onboarding.md; instructions/git/113_vscode_claude_onboarding.md; docs/157_github_multi_host_source_control_baseline_2026-09-17.md"
   },
   "coordinator_shadow_121_runtime": {
     "status": "C3_C4_SHADOW_RUNNING_SOAK_MONITORED",
