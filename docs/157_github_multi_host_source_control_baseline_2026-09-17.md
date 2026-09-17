@@ -38,9 +38,24 @@ connects to `.121`, deploys a container, writes a lease nor permits an order.
 Container secrets, state volumes, database/WAL and `.121` environment files
 remain local and excluded from Git.
 
-## Remaining administrator action
+## CI result and branch-protection limitation
 
-In GitHub repository settings, protect `main`: require pull requests and the
-`BigQMT source CI` check before merge; disable force push and deletion. `.105`
-remains the only integrator/release owner. `.125` and `.113` use the published
-onboarding instructions and push only `host/125/*` or `host/113/*` branches.
+GitHub Actions run `35221983165` for commit `ed9b07f` completed successfully:
+both `source-and-tray` and `coordinator-container` passed. The initial CI
+failures revealed missing source-only dependencies and an implicit dependency
+on local compiled Tray EXEs; both were corrected without committing binaries.
+
+The repository is private and the current GitHub plan rejects Branch Protection
+and Rulesets for private repositories (`403: Upgrade to GitHub Pro or make this
+repository public`). Therefore `main` is **not platform-enforced** yet. Keep
+the repository private: it contains trading architecture and operational
+documentation and must not be made public merely to obtain a free protection
+feature.
+
+Until GitHub Pro/Team is explicitly enabled, the operational gate is manual:
+only `.105` may push or merge `main`; `.125/.113` push only `host/125/*` or
+`host/113/*` and submit a PR. Before `.105` merges, both named CI checks must
+be green and the PR template must be complete. After an eligible plan upgrade,
+configure `main` to require PRs, `source-and-tray`,
+`coordinator-container`, conversation resolution, no force push and no
+deletion.

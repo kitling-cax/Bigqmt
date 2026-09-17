@@ -24,6 +24,10 @@ release/v<major>.<minor># 可选稳定维护线
 不得直接推送 `main`。每次 `.125/.113` 的变更都要经过本机测试、PR 和 `.105`
 集成。一个账户可有多个在线 QMT，但永远只能有一个 Coordinator 批准的执行主机。
 
+当前私有仓库的 GitHub Free 套餐不支持平台级 Branch Protection/Rulesets。此限制
+不降低运行安全门禁：在升级 GitHub Pro/Team 前，`main` 的人工门禁由 `.105` 执行，
+只能合并两项 CI 均为绿色且 PR 模板完整的变更；禁止 `.125/.113` 直接推送 `main`。
+
 ## 提交前门禁
 
 ```powershell
