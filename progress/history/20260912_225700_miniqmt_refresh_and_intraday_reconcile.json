@@ -1,0 +1,18 @@
+{
+  "recorded_at": "2026-09-12T22:57:00+08:00",
+  "stage": "P11_DATA_LAKE",
+  "stage_status": "IN_PROGRESS",
+  "action": "MiniQMT cache refresh plus 1d/1m/5m export",
+  "result": {
+    "510300.SH": {"1d": 9, "1m": 2169, "5m": 432, "volume_unit": "shares_measured"},
+    "600519.SH": {"1d": 9, "1m": 2169, "5m": 432, "volume_unit": "lots_measured"},
+    "amount_unit": "cny_measured"
+  },
+  "intraday_reconciliation": "PASSED; volume sums exact; amount rounding deltas <=145 CNY",
+  "evidence": "docs/104_miniqmt_embedded_export_probe_2026-09-12.md; runtime_data/evidence/simulation/miniqmt_exports/intraday_reconcile_20260912.json",
+  "orders_enabled": false,
+  "broker_calls": false,
+  "lake_write": false,
+  "global_latest_updated": false,
+  "next": "measure additional ETF/A-share symbols and implement per-asset unit contract before Bronze candidate merge"
+}

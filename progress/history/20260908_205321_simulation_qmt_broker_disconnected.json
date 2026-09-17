@@ -1,0 +1,28 @@
+{
+  "snapshot_at": "2026-09-08T20:53:21+08:00",
+  "environment": "simulation",
+  "event": "SIMULATION_QMT_BROKER_DISCONNECTED",
+  "reported_by_user": true,
+  "observed": {
+    "prior_readonly_ping": {
+      "time": "2026-09-08T20:50:45+08:00",
+      "account_id": "90000001",
+      "allow_order_methods": false,
+      "orders": [],
+      "trades": []
+    },
+    "snapshot_attempt": {
+      "time": "2026-09-08T20:52:00+08:00",
+      "script": "scripts/run_readonly_snapshot.py",
+      "result": "TimeoutError: read-only RPC timed out: ping"
+    }
+  },
+  "safety": {
+    "orders_enabled": false,
+    "order_intent_allowed": false,
+    "order_or_cancel_calls_made": false,
+    "formal_environment": "not_deployed_read_only_only"
+  },
+  "impact": "Live simulation QMT/Bridge, account and realtime quote validation are paused until the broker connection is restored. Offline PTrade/QMT-history diagnosis, unit tests, dry-run design and tray planning may continue.",
+  "resume_condition": "User confirms the simulated QMT client is reconnected and BIGQMT_REDIS_DRYRUN is running; then perform ping, account/positions/orders/trades snapshot and quote-health check before any other live validation."
+}

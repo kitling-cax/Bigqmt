@@ -1,0 +1,68 @@
+project: kitling_bigqmt
+environment: simulation
+orders_enabled: false
+stages:
+  P01_REDIS: PASSED
+  P02_QMT_BRIDGE: PASSED
+  P03_READ_ONLY: PASSED
+  P04_MARKET_DATA: PASSED
+  P05_RUNTIME_STATE: PASSED
+  P06_SIMULATION_ORDERS: IN_PROGRESS
+  P07_RECONCILIATION: PASSED
+  P08_V1_1_15: PASSED
+  P09_MULTI_STRATEGY: PASSED
+  P10_DASHBOARD_DATA_CONTRACT: PASSED
+  P11_DATA_LAKE: PASSED
+  P12_SIMULATION_ACCEPTANCE: IN_PROGRESS
+  P13_PRODUCTION_READ_ONLY: NOT_STARTED
+  P14_TRAY_MANAGER_CORE: IN_PROGRESS
+  P15_TRAY_RUNTIME_HEALTH: IN_PROGRESS
+  P16_AUTO_START_LOGIN: DEFERRED
+  P17_PRODUCTION_CANDIDATE: NOT_STARTED
+  P18_DASHBOARD_PRODUCT_RND: IN_PROGRESS
+  P19_PORTABLE_DEPLOYMENT_UPGRADE: IN_PROGRESS
+  P20_OPERATIONS_BACKUP_ALERTING: IN_PROGRESS
+  P21_REMOTE_READONLY_OBSERVABILITY: IN_PROGRESS
+  P22_STRATEGY_ONBOARDING_GOVERNANCE: IN_PROGRESS
+  P23_DATA_LAKE_SCHEDULE_RETENTION: IN_PROGRESS
+  P24_COORDINATOR_FOUNDATION: IN_PROGRESS
+  P25_WINDOWS_FLEET_HOST_AGENT: IN_PROGRESS
+  P26_OPENCLAW_MCP_SKILL: IN_PROGRESS
+  P27_REMOTE_SIMULATION_EXECUTION: NOT_STARTED
+  P28_MULTI_HOST_MIGRATION_ACCEPTANCE: NOT_STARTED
+
+data_lake_bigqmt_import_substage:
+  status: PUBLISHED_ISOLATED_RAW_VERIFIED
+  latest_release: runtime_data/candidates/bigqmt_candidate_20260912_145717
+  raw_bronze_import_plan: runtime_data/candidates/bigqmt_candidate_20260912_145717/raw_bronze_import_plan.json
+  isolated_publisher: scripts/publish_bigqmt_raw_overlay.py
+  publisher_preflight: READY_FOR_EXPLICIT_RAW_PUBLISH
+  publish_result: PUBLISHED_ISOLATED_RAW_VERIFIED
+  published_target: C:/BigQMT/research/quant_data_lake/bronze/_bigqmt_raw_releases/bigqmt_candidate_20260912_145717
+  publish_manifest: C:/BigQMT/research/quant_data_lake/bronze/_bigqmt_raw_releases/bigqmt_candidate_20260912_145717/publish_manifest.json
+  publish_verification: runtime_data/evidence/simulation/raw_publish/bigqmt_candidate_20260912_145717_verification.json
+  daily_valid_missing_rows: 22218
+  intraday_candidate_rows: 35836
+  pre_listing_placeholders_quarantined: 6260
+  legacy_bars_raw_direct_append: BLOCKED_REQUIRES_ISOLATED_SCHEMA
+  silver_pit: BLOCKED_CANONICAL_FACTOR_CHAIN_AND_AVAILABLE_AT
+  lake_write: true
+  latest_pointer_updated: false
+  etf_u25_research_pit:
+    status: PUBLISHED_ISOLATED_RESEARCH_PIT
+    release_id: bigqmt_etf_research_pit_20260912_175315
+    published_target: C:/BigQMT/research/quant_data_lake/silver/_bigqmt_research_pit_releases/bigqmt_etf_research_pit_20260912_175315
+    scope: v1.1.17_U25_25_ETF_daily_split_only_conservative_available_at
+    research_inputs: 25-day trailing return and maximum drawdown probe PASSED
+    global_silver_pit: BLOCKED_CANONICAL_FACTOR_CHAIN_AND_EXACT_AVAILABLE_AT
+    latest_pointer_updated: false
+
+unified_market_data_lake_v2:
+  status: IN_PROGRESS_FOUNDATION
+  contract: config/unified_data_lake_v2_contract.json
+  initializer: scripts/initialize_unified_data_lake_v2.py
+  target: C:/BigQMT/research/quant_data_lake/v2
+  source_policy: MiniQMT/Tushare/BigQMT source-preserving Bronze, canonical Silver only after quality gates
+  current_research_channel: U25_ETF_RESEARCH_PIT fixed isolated release
+  global_pit_v2: BLOCKED_CANONICAL_ACTIONS_AND_AVAILABLE_AT
+  legacy_data_or_latest_modified: false

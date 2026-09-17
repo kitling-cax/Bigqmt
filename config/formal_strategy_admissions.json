@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "environment": "production",
+  "default": {
+    "orders_enabled": false,
+    "require_explicit_user_approval": true,
+    "require_strategy_specific_release": true,
+    "require_qmt_bridge_reconciliation": true,
+    "require_fresh_quote": true,
+    "require_no_open_orders": true
+  },
+  "approved_strategies": [],
+  "note": "Empty approved_strategies is intentional. The tray recovery-intent switch cannot alter this file or grant order capability."
+}

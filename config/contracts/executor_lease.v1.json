@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://contracts/executor_lease.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "account_id", "host_id", "mode", "fencing_token", "coordinator_epoch", "expires_at"],
+  "properties": {
+    "schema_version": {"const": 1}, "account_id": {"type": "string"}, "host_id": {"type": "string"},
+    "mode": {"enum": ["ACTIVE_EXECUTOR", "STANDBY_READONLY", "READ_ONLY"]},
+    "fencing_token": {"type": "integer", "minimum": 1}, "coordinator_epoch": {"type": "integer", "minimum": 1},
+    "expires_at": {"type": "number"}
+  }
+}

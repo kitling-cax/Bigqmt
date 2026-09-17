@@ -1,0 +1,14 @@
+[Unit]
+Description=Kitling BigQMT Coordinator read-only shadow soak probe
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/bigqmt-coordinator-shadow/soak_probe.py --output /var/log/kitling-bigqmt-coordinator-shadow/soak.jsonl
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/kitling-bigqmt-coordinator-shadow

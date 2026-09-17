@@ -1,0 +1,24 @@
+{
+  "recorded_at": "2026-09-12T22:50:00+08:00",
+  "reason": "记录完成后开始执行 MiniQMT 数据湖验证",
+  "stage_before_execution": "P11_DATA_LAKE",
+  "stage_status": "IN_PROGRESS",
+  "simulation_account": "90000001",
+  "production_account": "90000002",
+  "orders_enabled": false,
+  "global_latest_updated": false,
+  "approved_research_release": "C:/BigQMT/research/quant_data_lake/silver/_bigqmt_research_pit_releases/bigqmt_etf_research_pit_20260912_175315",
+  "global_pit_gate": "BLOCKED_CANONICAL_ACTIONS_AND_AVAILABLE_AT",
+  "next_actions": [
+    "重跑完整 pytest（含 MiniQMT 新增测试）",
+    "检查 MiniQMT 内置 Python 导出脚本语法与使用说明",
+    "在 QMT 内置 Python 中只读采集 510300.SH、600519.SH 日线并测量单位",
+    "主机侧执行 normalize_miniqmt；单位未确认则拒绝导入"
+  ],
+  "safety": [
+    "正式账户只读",
+    "不调用下单/撤单",
+    "不覆盖旧 Silver/PIT 或 catalog/LATEST",
+    "候选发布失败关闭"
+  ]
+}

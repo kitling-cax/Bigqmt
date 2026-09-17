@@ -1,0 +1,22 @@
+# QMT runtime paths for kitling_bigqmt
+# Do not place account passwords or tokens in this file.
+
+version: 1
+updated: 2026-09-07
+
+simulation:
+  install_root: 'C:\BigQMT\work\国金QMT交易端模拟'
+  bin_x64: 'C:\BigQMT\work\国金QMT交易端模拟\bin.x64'
+  mode: simulation
+  order_enabled: false
+
+production:
+  install_root: 'C:\BigQMT\work\国金证券QMT交易端'
+  bin_x64: 'C:\BigQMT\work\国金证券QMT交易端\bin.x64'
+  mode: production_readonly
+  order_enabled: false
+
+policy:
+  active_terminal: simulation
+  production_orders_allowed: false
+  auto_login_enabled: false

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "simulation": {
+    "v1_1_15_auto_run_enabled": true,
+    "v1_1_15_preflight_only_dates": [],
+    "policy_note": "Native tray master switch; it does not itself submit an order."
+  },
+  "production": {
+    "strategy_recovery_enabled": false,
+    "policy_note": "Reserved for a future separately approved per-strategy formal execution admission. This flag grants no order capability."
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://contracts/node_heartbeat.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "host_id", "sent_at", "state", "services"],
+  "properties": {
+    "schema_version": {"const": 1}, "host_id": {"type": "string", "minLength": 1},
+    "sent_at": {"type": "string", "format": "date-time"},
+    "state": {"enum": ["HEALTHY_READONLY", "ACTIVE_EXECUTOR", "DEGRADED", "OFFLINE"]},
+    "services": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}

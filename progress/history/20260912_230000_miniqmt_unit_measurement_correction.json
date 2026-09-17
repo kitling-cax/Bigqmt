@@ -1,0 +1,11 @@
+{
+  "recorded_at": "2026-09-12T23:00:00+08:00",
+  "supersedes": "20260912_225700_miniqmt_refresh_and_intraday_reconcile.json unit field only",
+  "correction": "初步将 ETF volume 标为 shares_measured 的判断已撤回；按 amount/close/volume≈100 复核，510300.SH、600519.SH、000001.SZ 均为 lots_measured（手）",
+  "evidence": "runtime_data/evidence/simulation/miniqmt_exports/unit_sample_1d_20260912.csv; probe_after_refresh_1d_510300_20260912.validation.json",
+  "current_policy": "MiniQMT sampled daily/intraday volume=lots_measured, amount=cny_measured; broader sample still required",
+  "orders_enabled": false,
+  "broker_calls": false,
+  "lake_write": false,
+  "global_latest_updated": false
+}

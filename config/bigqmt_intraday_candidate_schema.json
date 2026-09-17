@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "DRAFT_CANDIDATE_ONLY",
+  "purpose": "Schema for a future BigQMT 1m/5m candidate overlay; not a published lake table",
+  "storage_target": "runtime_data/evidence or quant_data_lake/_staging only after all gates pass",
+  "business_key": ["code", "bar_time", "period", "adjustment_mode"],
+  "partitioning": ["period", "year", "month"],
+  "columns": {
+    "code": "VARCHAR",
+    "bar_time": "TIMESTAMP WITH TIME ZONE; Asia/Shanghai bar-end time",
+    "trade_date": "DATE; Asia/Shanghai session date",
+    "period": "VARCHAR; one of 1m, 5m",
+    "adjustment_mode": "VARCHAR; none only in raw candidate",
+    "open": "DOUBLE; CNY per share/unit",
+    "high": "DOUBLE; CNY per share/unit",
+    "low": "DOUBLE; CNY per share/unit",
+    "close": "DOUBLE; CNY per share/unit",
+    "volume_lots": "DOUBLE; lots/hands",
+    "amount_yuan": "DOUBLE; CNY",
+    "source": "VARCHAR; bigqmt",
+    "source_release": "VARCHAR; immutable QMT cache evidence id",
+    "available_at": "TIMESTAMP WITH TIME ZONE",
+    "row_hash": "VARCHAR; stable normalized row hash"
+  },
+  "quality_rules": {
+    "ohlc": "positive and high >= max(open, low, close), low <= min(open, high, close)",
+    "volume_amount": "non-negative",
+    "time": "strictly increasing within code+period+trade_date; no duplicate bar_time",
+    "session_counts": {"1m": 241, "5m": 48},
+    "cross_period_reconciliation": "intraday volume/amount sum approximately equals same-day 1d raw QMT bar",
+    "adjustment": "raw candidate uses dividend_type=none; front/back diagnostic only",
+    "pit": "available_at must not be after the observation/use timestamp"
+  },
+  "release_gates": [
+    "schema_and_business_key",
+    "source_row_hash_and_duplicate_check",
+    "ohlc_volume_amount_quality",
+    "session_calendar_and_partial_day_check",
+    "cross_period_unit_reconciliation",
+    "cross_source_price_reconciliation",
+    "PIT_factor_and_corporate_action_chain",
+    "candidate_release_approval"
+  ],
+  "safety": {
+    "lake_write": false,
+    "global_latest_updated": false,
+    "orders_enabled": false
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "coordinator_endpoint": "http://192.0.2.121:18443",
+  "comment": "Non-secret local configuration. Save as bigqmt_readonly.local.json beside bigqmt_readonly_mcp.py."
+}

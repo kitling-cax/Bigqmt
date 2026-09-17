@@ -1,0 +1,34 @@
+version: 1
+root: C:/BigQMT/work/kitling_bigqmt/runtime_data/lake
+authoritative_sources:
+  broker_account_positions: sqlite_wal_snapshot
+  strategy_sleeve_nav: sqlite_wal_sleeve_nav
+  strategy_benchmark: sqlite_wal_strategy_benchmark
+  realtime_bus: redis
+  research_supplement: kitling_AI量化_review
+formats:
+  canonical_archive: parquet
+  analytical_query: duckdb
+  realtime_timeseries: deferred_questdb
+sync_policy:
+  qmt_to_sqlite: readonly_snapshot_worker
+  sqlite_to_parquet: explicit_export_or_scheduled_tray_job
+  parquet_to_duckdb: query_in_place
+  questdb: disabled_until_tick_volume_requires_it
+  research_lake_to_trading: never_implicit; explicit_source_approval_required
+retention:
+  default_days: 365
+  audit_command: py scripts/audit_lake_retention.py --retention-days 365
+  deletion: disabled_by_default; separate_user_approval_required
+partitions:
+  - environment
+  - trading_date
+  - source_run_id
+datasets:
+  - account_assets
+  - broker_positions
+  - broker_orders
+  - broker_trades
+  - qmt_quotes
+  - strategy_nav
+  - strategy_benchmark

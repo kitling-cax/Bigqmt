@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/strategy_nav.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot_id", "account_id", "strategy_id", "as_of", "cash", "market_value", "nav", "received_time"],
+  "properties": {
+    "schema_version": {"const": 1}, "snapshot_id": {"type": "string", "format": "uuid"},
+    "account_id": {"type": "string"}, "strategy_id": {"type": "string"},
+    "as_of": {"type": "string", "format": "date-time"}, "received_time": {"type": "string", "format": "date-time"},
+    "cash": {"type": "number"}, "market_value": {"type": "number"}, "nav": {"type": "number"}
+  }
+}

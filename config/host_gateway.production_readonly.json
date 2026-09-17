@@ -1,0 +1,21 @@
+{
+  "environment": "production",
+  "account_id": "90000002",
+  "account_type": "STOCK",
+  "read_only": true,
+  "redis": {
+    "host": "127.0.0.1",
+    "port": 6380,
+    "db": 5,
+    "password": ""
+  },
+  "formula_server": {
+    "enabled": false,
+    "reason": "simulation and formal QMT both configure 58600; formal host access must use its isolated Redis Bridge"
+  },
+  "rpc_timeout_seconds": 12,
+  "bridge_snapshot_max_age_seconds": 4500,
+  "state_db": "F:\\kitling_QMT_work\\kitling_bigqmt\\runtime_data\\state\\production\\qmt_runtime.sqlite3",
+  "audit_dir": "F:\\kitling_QMT_work\\kitling_bigqmt\\runtime_data\\audit\\production",
+  "quote_codes": []
+}

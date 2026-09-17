@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "baseline_kind": "ptrade_strategy_reproduction_contract",
+  "status": "FROZEN_SOURCE_BASELINE",
+  "strategy_id": "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15",
+  "shadow_id": "S10_D1_U25_NO_ALCOHOL_6D_SIM_SHADOW_V1_1_15",
+  "code_version": "v1.1.15-U25-NO-ALCOHOL-ETF-5D-SIM-OWNED-POSITION",
+  "source": {
+    "platform": "Guojin PTrade UAT",
+    "path": "C:/BigQMT/research/PTtrade策略编辑器/ptrade策略项目/S10-D1_低频动量轮动_RC1-RC2/策略源码/当前候选/5日/s10_d1_u25_no_alcohol_etf_5d_sim_owned_position_v1.1.15.py",
+    "sha256": "2E7C209AA2921E7052EB716BCBA3758E59CAD5BE8079C0F17E79B9DA7DBC11E4",
+    "python_compatibility": "3.5",
+    "frequency": "minute",
+    "source_audit": "ptrade-strategy-engineering audit_ptrade_source.py: syntax_ok, zero findings"
+  },
+  "capital_and_costs": {
+    "sleeve_initial_capital": 100000.0,
+    "target_cash_ratio": 0.98,
+    "commission_ratio_one_side": 0.0001,
+    "minimum_commission": 5.0,
+    "slippage_one_side": 0.001,
+    "ptrade_slippage_parameter": 0.002,
+    "backtest_volume_ratio": 1.0,
+    "lot_size": 100,
+    "price_tick": 0.001
+  },
+  "universe_ptrade": [
+    "518880.SS", "501225.SS", "513030.SS", "563230.SS", "512980.SS",
+    "513090.SS", "512200.SS", "162415.SZ", "159915.SZ", "159985.SZ",
+    "161226.SZ", "159941.SZ", "161127.SZ", "159852.SZ", "162719.SZ",
+    "159582.SZ", "162411.SZ", "159995.SZ", "160723.SZ", "159667.SZ",
+    "159530.SZ", "159611.SZ", "159992.SZ", "515880.SS", "159755.SZ"
+  ],
+  "fallback_ptrade": "511880.SS",
+  "qmt_code_normalization": {
+    "rule": "PTrade .SS maps to QMT .SH; .SZ remains .SZ. No other suffix translation is permitted.",
+    "adjusted_daily_price_equivalence": "VERIFIED(2026-09-15): QMT dividend_type='front' ≡ PTrade dypre for momentum",
+    "raw_daily_price_equivalence": "VERIFIED(2026-09-15): QMT dividend_type='none' ≡ PTrade raw close for risk (83/83)",
+    "parity_quantified_residual": {
+      "verified_at": "2026-09-15 Asia/Shanghai",
+      "momentum_best_code_matches": "2010/2029 (99.06%)",
+      "momentum_ptrade_best_score_matches": "2023/2029 (99.70%)",
+      "risk_raw_matches": "83/83 comparable days (100%)",
+      "residual_breakdown": {
+        "ptrrade_freeze_exclusion": 7,
+        "qdi_lof_supplier_price_difference": 12,
+        "split_factor_precision": 6
+      },
+      "claim": "front ≡ dypre for momentum and none ≡ raw close for risk, with the quantified residual above; not an unconditional 100% equivalence claim."
+    }
+  },
+  "signal_rules": {
+    "momentum_window_completed_days": 25,
+    "momentum_formula": "legacy weighted log regression: linear weights 1..2; squared weights in regression; linear weights in residual R2; unweighted log mean; annualization 250; truncate toward zero to 4 decimals",
+    "momentum_range_inclusive": [0.05, 2.0],
+    "sma_window": 4,
+    "ordinary_switch_requires": "candidate close > SMA4 and candidate_score > current_score * 1.05",
+    "rc1_min_hold_completed_days": 5,
+    "rc2_shadow_min_hold_completed_days": 6,
+    "risk_priority": ["daily_drop<=-4%", "drawdown_from_high<=-5%", "return_from_actual_entry_cost>=12%"],
+    "risk_target": "eligible momentum top rank without SMA4; otherwise fallback",
+    "stop_freeze_completed_sessions": 1,
+    "take_profit_freeze_completed_sessions": 2
+  },
+  "execution_rules": {
+    "signal_time": "after_trading_end on completed daily bars",
+    "normal_execution": "next trading day from 09:31; sell before buy",
+    "window": "09:31-11:29,13:01-14:50",
+    "protection_limit_ratio": {"buy": 0.003, "sell": 0.003},
+    "positive_minute_volume_required": true,
+    "rc1": "broker-order branch in PTrade; QMT reproduction remains dry-run until a separate simulation-order authorization",
+    "rc2": "6-day shadow branch only; never sends broker order",
+    "recovery": "only non-09:31 first intraday callback with missing normal state; reconstruct from previous completed close only"
+  },
+  "accounting_and_ownership": {
+    "startup_mode": "REQUIRE_FLAT",
+    "allowed_modes": ["REQUIRE_FLAT", "ADOPT_EXPLICIT", "ISOLATE_NEW"],
+    "cash_and_owned_quantity_source": "attributable real trades only",
+    "reconciliation": "external baseline + strategy-owned quantity = broker account quantity",
+    "unfinanceable_partial_buy_tail": "accept filled strategy position and clear pending only when sleeve cash cannot finance one lot; do not use broker frozen cash as profit"
+  },
+  "ptrade_gold_evidence": {
+    "validated_interval": "2018-01-01..2026-09-02",
+    "ptrade_page_return_pct": 5724.25,
+    "sleeve_ledger_nav": 5824251.32,
+    "sleeve_ledger_return_pct": 5724.2513,
+    "live_signals": 327,
+    "trade_export": "C:/BigQMT/research/PTtrade策略编辑器/ptrade策略项目/S10-D1_低频动量轮动_RC1-RC2/5日回测/持有5天v1.1.15_长期/交易详情20260905140146.csv",
+    "position_export": "C:/BigQMT/research/PTtrade策略编辑器/ptrade策略项目/S10-D1_低频动量轮动_RC1-RC2/5日回测/持有5天v1.1.15_长期/持仓明细20260905140134.csv"
+  },
+  "qmt_reproduction_acceptance": [
+    "Verify QMT completed daily adjusted and raw bars against PTrade samples before calculating a signal.",
+    "For identical dated inputs, match per-security momentum score, SMA4 pass, risk reason and desired target exactly.",
+    "Match the PTrade close-signal to next-session target sequence before comparing any simulated execution price or fill.",
+    "Run the QMT side in local Dry-run first; record intent only and preserve the PTrade timing, ownership and compounding state machine.",
+    "Do not claim execution or performance parity until QMT simulated fills, fees, partial fills and sleeve NAV reconcile separately."
+  ],
+  "orders_enabled": false
+}

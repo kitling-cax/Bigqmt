@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/order_event.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "request_id", "account_id", "strategy_id", "host_id", "event_type", "event_time", "received_time", "payload_hash"],
+  "properties": {
+    "schema_version": {"const": 1}, "event_id": {"type": "string", "format": "uuid"},
+    "request_id": {"type": "string", "format": "uuid"}, "account_id": {"type": "string"},
+    "strategy_id": {"type": "string"}, "host_id": {"type": "string"},
+    "event_type": {"enum": ["INTENT_CREATED", "SUBMIT_RESULT", "ORDER_SNAPSHOT", "CANCEL_RESULT", "RECONCILED"]},
+    "event_time": {"type": "string", "format": "date-time"}, "received_time": {"type": "string", "format": "date-time"},
+    "payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

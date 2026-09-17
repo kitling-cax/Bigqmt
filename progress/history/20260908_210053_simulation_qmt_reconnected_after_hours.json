@@ -1,0 +1,29 @@
+{
+  "snapshot_at": "2026-09-08T21:00:53+08:00",
+  "environment": "simulation",
+  "event": "SIMULATION_QMT_RECONNECTED_AFTER_HOURS",
+  "orders_enabled": false,
+  "order_intent_allowed": false,
+  "readonly_snapshot": {
+    "status": "PASSED",
+    "run_id": "9ee0e69261c4467e82eba558177426c8",
+    "account_id": "90000001",
+    "total_asset": 10042579.74,
+    "position_count": 5,
+    "order_count": 0,
+    "trade_count": 0,
+    "quote_count": 5,
+    "allow_order_methods": false
+  },
+  "after_hours_quote_gate": {
+    "status": "BLOCKED",
+    "reason": "market closed; 5/5 persisted quotes are stale against the 180-second trading-time freshness gate",
+    "action": "No order intent. Re-run quote health during the next trading session."
+  },
+  "safety": [
+    "Snapshot is read-only.",
+    "No order or cancel method was called.",
+    "Existing broker positions remain unassigned external baseline positions."
+  ],
+  "next_gate": "During a trading session, collect fresh full-tick evidence, then continue P06 read-only diagnostics; parity evidence independently continues to block order intent."
+}

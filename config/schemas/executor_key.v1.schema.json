@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/executor_key.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "account_id", "environment", "key_id", "issued_at", "expires_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "account_id": {"type": "string", "pattern": "^[0-9]+$"},
+    "environment": {"enum": ["SIMULATION", "PRODUCTION"]},
+    "key_id": {"type": "string", "minLength": 8},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  },
+  "description": "Plaintext key material is intentionally absent. This schema describes only non-secret metadata."
+}

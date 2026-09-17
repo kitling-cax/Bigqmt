@@ -1,0 +1,190 @@
+program: MULTI_HOST_QMT_OPENCLAW_COORDINATOR
+schema_version: 1
+updated_at: 2026-09-16T21:00:00+08:00
+status: M03_M05_READONLY_FLEET_HOST_AGENT_AND_121_CONTAINER_DEVELOPMENT
+execution_changes_authorized: false
+overall_verified_percent: 30
+percent_rule: only PASSED or VERIFIED milestone acceptance weight is counted; reusable legacy code is not counted until adapted and tested
+
+fixed_topology:
+  development_windows: 192.0.2.105
+  coordinator_candidate: 192.0.2.121
+  development_active_executor_candidate: 192.0.2.105
+  future_migration_target: 192.0.2.125
+  future_standby_candidate: 198.51.100.113
+  nas: 192.0.2.236
+  development_active_os: Windows 11 on PVE1
+  future_primary_os: Windows 11 physical
+  future_standby_os: Windows 11 on ESXi-C
+  coordinator_os: Ubuntu 24.04.4 LTS
+  execution_sequence: 192.0.2.105 during development and stabilization, then manual migration to 192.0.2.125; 198.51.100.113 remains standby
+  coordinator_initial_endpoint: https://192.0.2.121:18443
+  coordinator_dns: DEFERRED_UNTIL_MULTI_HOST_STABILIZATION
+
+safety_invariants:
+  - one ACTIVE_EXECUTOR lease per account
+  - all other hosts STANDBY_READONLY
+  - OpenClaw submits typed intents and never calls QMT Redis or broker RPC directly
+  - Windows Host Agent pulls intents; Coordinator does not push into exposed Windows ports
+  - Coordinator unavailable means no new orders
+  - NAS is never a live lock database or runtime filesystem
+  - production account remains READ_ONLY until separate future authorization
+  - OpenClaw release packages are read from NAS then installed locally per agent; no live Skill or MCP runtime executes from SMB
+  - execution@198.51.100.113 and xiaocai@192.0.2.125 are separate candidate executor identities; only one may receive simulation confirm scope per account at a time
+
+milestones:
+  M00_ARCHITECTURE_AND_NETWORK_BASELINE:
+    weight: 5
+    status: PASSED
+    deliverables:
+      - docs/118_qmt_host_openclaw_and_lan_assessment_2026-09-14.md
+      - docs/119_openclaw_mcp_skill_and_portable_coordinator_plan_2026-09-14.md
+      - runtime_data/evidence/network/lan_connectivity_20260914_1146.json
+      - runtime_data/evidence/network/coordinator_candidate_192_168_1_121_20260914.json
+      - docs/122_multi_host_bigqmt_implementation_plan_v2_2026-09-14.md
+    gate: topology recommendation and one-way plus Coordinator reverse connectivity recorded
+
+  M01_PORTABLE_CONFIG_AND_CONTRACTS:
+    weight: 10
+    status: PASSED
+    deliverables:
+      - config/coordinator.example.json
+      - src/kitling_bigqmt/coordinator_core.py
+      - config/schemas/machine.local.schema.json
+      - config/contracts/node_heartbeat.v1.json
+      - config/contracts/account_snapshot.v1.json
+      - config/contracts/executor_lease.v1.json
+      - config/contracts/order_intent.v1.json
+      - config/contracts/order_result.v1.json
+      - effective config renderer and hash
+      - hardcoded path and port audit
+      - docs/127_m01_m02_local_coordinator_acceptance_2026-09-14.md
+      - docs/134_m01_machine_local_single_point_override_acceptance_2026-09-15.md
+      - scripts/verify_machine_local_config.py
+      - tests/test_machine_config.py; tests/test_machine_config_audit.py (14 passed)
+    gate: invalid local config fails closed; all entry points resolve the same effective paths and endpoints
+    open_items: []
+    resolved:
+      - runtime-loader fail-closed semantics (option B, hard-fail): present-but-malformed machine.local.json raises MachineLocalConfigError from load_machine_local/load_gateway/load_tray_profiles/effective_config; missing file still falls back to empty dict
+
+  M02_COORDINATOR_CORE:
+    weight: 15
+    status: PASSED
+    deliverables:
+      - src/kitling_bigqmt/coordinator_core.py
+      - tests/test_coordinator_core.py (6 passed)
+      - portable Coordinator service
+      - SQLite WAL schema and migrations
+      - node registry heartbeat lease epoch fencing and audit APIs
+      - systemd service and offline wheelhouse release
+      - deploy/coordinator/README.md (bootstrap package generated)
+    gate: two fake hosts can never hold a valid executor lease for the same account
+
+  M03_WINDOWS_HOST_AGENT:
+    weight: 15
+    status: IN_PROGRESS
+    deliverables:
+      - Windows Host Agent integrated with account tray
+      - outbound heartbeat snapshot upload and intent polling
+      - local fencing and account/environment validation
+      - simulation and production profile isolation
+      - src/kitling_bigqmt/execution_admission.py single fail-closed order gate
+      - three local order entry points required to pass the gate before any RPC write
+      - tests/test_execution_admission.py (16 passed)
+      - C# native tray read-only intent polling line backed by scripts/probe_host_agent_intent_preview.py
+      - read-only intent probe is zero-argument and fails closed with a DEGRADED envelope and exit 0 when the Coordinator is unreachable
+      - tests/test_host_agent_intent_preview.py (2 intent CLI tests, 8 in file) plus full suite 210 passed
+      - native trays rebuilt 2026-09-15T21:36:28+08:00 and re-verified by SHA-256 against tray/BigQMT_native_tray_checksums.sha256
+      - 'live evidence: both account trays audit coordinator_intent_preview empty_readonly with orders_enabled=false'
+    gate: development host 192.0.2.105 reports first; later 125 and 113 report independently; every standby is denied Bridge order methods
+
+  M04_FLEET_MONITORING_AND_PROGRESS:
+    weight: 10
+    status: IN_PROGRESS
+    deliverables:
+      - Fleet Monitor Tray client
+      - central read-only Fleet Dashboard
+      - project progress CLI JSON and dashboard projection
+      - alerts for node QMT Redis Bridge lease snapshot and strategy state
+    gate: UI closure does not stop Coordinator; displayed state includes source time freshness and role
+
+  M05_OPENCLAW_MCP_AND_SKILL:
+    weight: 10
+    status: IN_PROGRESS
+    deliverables:
+      - BigQMT MCP Server in Agent Gateway
+      - bigqmt-operator SKILL.md
+      - OpenClaw install verify and checksum bundle
+      - observer reporter and executor_simulation scopes
+      - NAS candidate/stable release channel and local per-agent installer
+    gate: phone can query fresh read-only state; only user-designated executor agent can access simulation confirmation tools; unauthorized tools and stale data fail closed
+
+  M06_SIMULATION_REMOTE_ORDER_INTENTS:
+    weight: 15
+    status: NOT_STARTED
+    deliverables:
+      - preview confirmation expiry cancellation and idempotency state machine
+      - ACTIVE_EXECUTOR claim and local execution handoff
+      - result and fill reconciliation back to phone Dashboard and sleeve accounting
+    gate: authorized simulation round trip passes; duplicates wrong host stale token and ambiguity are rejected
+
+  M07_FAILOVER_AND_COORDINATOR_MIGRATION:
+    weight: 10
+    status: IN_PROGRESS
+    deliverables:
+      - first complete OCI/Docker development and shadow acceptance on current 192.0.2.121 Ubuntu host without changing the stable endpoint
+      - docs/138_coordinator_121_container_first_decision_2026-09-16.md
+      - docs/140_coordinator_shadow_container_c0_c1_implementation_2026-09-16.md
+      - container/coordinator/Dockerfile; container/coordinator/compose.shadow.yaml; container/coordinator/entrypoint.sh
+      - src/kitling_bigqmt/coordinator_instance.py; src/kitling_bigqmt/coordinator_key_authority.py
+      - src/kitling_bigqmt/coordinator_backup.py; scripts/coordinator/prepare_shadow_database.py
+      - docs/141_coordinator_outbox_fact_store_c2_foundation_2026-09-16.md
+      - src/kitling_bigqmt/coordinator_outbox.py; src/kitling_bigqmt/coordinator_event_store.py
+      - docs/142_authenticated_fact_ingest_opt_in_2026-09-16.md
+      - src/kitling_bigqmt/coordinator_fact_auth.py; src/kitling_bigqmt/coordinator_fact_ingress.py
+      - docs/143_host_fact_identity_distribution_rotation_2026-09-16.md
+      - src/kitling_bigqmt/host_fact_identity.py; scripts/coordinator/manage_fact_identity.py
+      - docs/144_coordinator_shadow_121_runtime_preflight_2026-09-16.md
+      - docs/145_host_fact_outbox_delivery_orchestration_2026-09-16.md
+      - src/kitling_bigqmt/host_fact_uploader.py; tests/test_host_fact_uploader.py
+      - manual 105 to 125 execution migration workflow
+      - later manual 125 to 113 standby takeover workflow
+      - Coordinator migrate-out and migrate-in tools
+      - coordinator_epoch rollover and stable endpoint switch
+      - network partition and old-primary rejection evidence
+    gate: no split brain during host takeover or Coordinator relocation
+
+  M08_RELEASE_OPERATIONS_AND_ACCEPTANCE:
+    weight: 10
+    status: NOT_STARTED
+    deliverables:
+      - immutable NAS releases and channel pointers
+      - Windows Ubuntu and OpenClaw installation runbooks
+      - backup restore rollback and disaster exercises
+      - final simulation multi-host acceptance report
+    gate: clean-machine install update rollback restart and recovery are independently reproducible
+
+approval_points:
+  AP1: approve this plan and start M01/M02 local implementation
+  AP2: approve read-only Coordinator deployment to 192.0.2.121
+  AP3: approve Host Agent integration on existing development host 192.0.2.105; later approve read-only deployment to 192.0.2.125 and 198.51.100.113
+  AP4: approve OpenClaw read-only query integration from NAS release packages on 192.0.2.125 and 198.51.100.113
+  AP5: choose execution@198.51.100.113 or xiaocai@192.0.2.125 as the single current phone-order ingress, provide permitted phone/channel identity, then approve that one agent for simulation intent execution
+  AP6: future separate production trading authorization; not included in this program
+
+progress_sources:
+  human_summary: progress/status.md
+  phase_state: progress/project_plan.yaml
+  program_state: progress/multi_host_program.yaml
+  current_runtime: progress/current_status.json
+  latest_tests: progress/latest_tests.json
+  blockers: progress/blockers.json
+  immutable_history: progress/history
+
+next_after_confirmation:
+  - integrate the completed coordinator_instance_id, single-instance lock and epoch floor into the deployed shadow entrypoint only
+  - persist account-scoped simulation and production Key observations plus duplicate-Key lockdown in the Coordinator database and Host Agent reporting path
+  - install per-host fact signing identities through a protected secret mechanism, then enable fact ingest only in shadow after TLS/time-window/replay tests
+  - build the portable OCI image and compose bundle locally, then run C3/C4 isolated tests
+  - deploy a read-only shadow container to 192.0.2.121:18666 using a SQLite online-backup database copy; keep the current systemd service authoritative on 18443 (C3/C4 running; 24–48 hour soak pending)
+  - choose LXC, another VM, TrueNAS or VPS only after the 192.0.2.121 container passes acceptance

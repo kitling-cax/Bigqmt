@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/checkpoint_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "checkpoint_id", "account_id", "strategy_id", "source_host_id", "created_at", "payload_sha256", "relative_archive_path"],
+  "properties": {
+    "schema_version": {"const": 1}, "checkpoint_id": {"type": "string", "format": "uuid"},
+    "account_id": {"type": "string"}, "strategy_id": {"type": "string"}, "source_host_id": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relative_archive_path": {"type": "string", "pattern": "^(?!.*\\.\\.).+$"}
+  },
+  "description": "A portable continuation checkpoint. The actual payload is archived separately on NAS."
+}

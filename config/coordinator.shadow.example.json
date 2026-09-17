@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "mode": "SHADOW_READONLY",
+  "bind_host": "192.0.2.121",
+  "port": 18666,
+  "database_path": "/var/lib/kitling-bigqmt-coordinator-shadow/coordinator.sqlite3",
+  "state_directory": "/var/lib/kitling-bigqmt-coordinator-shadow",
+  "source_of_truth": "copied_online_backup_from_18443_only",
+  "safety": {
+    "orders_enabled": false,
+    "execution_writes_disabled": true,
+    "lease_grants_disabled": true,
+    "intent_confirm_disabled": true
+  }
+}

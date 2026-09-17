@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "status": "CANONICAL_RAW_OVERLAY_READY_FOR_EXPLICIT_PUBLISH",
+  "purpose": "Canonical schema for an isolated BigQMT raw overlay; publish only through scripts/publish_bigqmt_raw_overlay.py with explicit approval",
+  "target_tables": {
+    "daily": "bronze/bigqmt_raw_overlay",
+    "intraday": "bronze/bigqmt_intraday_raw_overlay"
+  },
+  "business_key": ["code", "bar_time", "period", "adjustment_mode"],
+  "partitioning": {
+    "daily": ["year", "period"],
+    "intraday": ["year", "month", "period"]
+  },
+  "columns": {
+    "code": "VARCHAR",
+    "bar_time": "TIMESTAMP WITH TIME ZONE",
+    "trade_date": "DATE",
+    "period": "VARCHAR",
+    "adjustment_mode": "VARCHAR",
+    "open": "DOUBLE",
+    "high": "DOUBLE",
+    "low": "DOUBLE",
+    "close": "DOUBLE",
+    "volume_lots": "DOUBLE",
+    "amount_yuan": "DOUBLE",
+    "source": "VARCHAR",
+    "source_release": "VARCHAR",
+    "available_at": "TIMESTAMP WITH TIME ZONE",
+    "row_hash": "VARCHAR"
+  },
+  "raw_rules": {
+    "adjustment_mode": "none only",
+    "price_units": "CNY per share or unit",
+    "volume_units": "hands/lots; use measured QMT evidence",
+    "amount_units": "CNY; use measured QMT evidence",
+    "null_ohlcv": "reject from publishable candidate",
+    "pre_listing_zero_rows": "quarantine and never manufacture prices",
+    "legacy_bars_raw": "do not append without explicit schema migration"
+  },
+  "release_gates": [
+    "candidate_import_readiness",
+    "isolated_schema_migration_review",
+    "row_level_conflict_check",
+    "candidate_release_approval",
+    "PIT_factor_chain_for_silver_only"
+  ],
+  "safety": {
+    "lake_write": false,
+    "global_latest_updated": false,
+    "orders_enabled": false,
+    "legacy_bars_raw_modified": false,
+    "silver_pit_published": false
+  }
+}

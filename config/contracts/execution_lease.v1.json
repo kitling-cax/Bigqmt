@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "kind": "bigqmt_execution_lease",
+  "required": [
+    "schema_version",
+    "account_id",
+    "host_id",
+    "mode",
+    "fencing_token",
+    "coordinator_epoch",
+    "expires_at"
+  ],
+  "mode_constraints": {
+    "allowed": ["ACTIVE_EXECUTOR", "STANDBY_READONLY", "READ_ONLY"],
+    "production_readonly_account": "90000002",
+    "production_readonly_allowed_modes": ["READ_ONLY", "STANDBY_READONLY"]
+  },
+  "safety": {
+    "orders_enabled": false,
+    "meaning": "The lease is an execution prerequisite, never an order authorization.",
+    "transport_requirement": "A future Coordinator response must be authenticated and integrity protected before a Host Agent treats this envelope as trusted."
+  }
+}

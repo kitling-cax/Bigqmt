@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/key_observation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "observation_id", "account_id", "host_id", "environment", "key_fingerprint", "observed_at", "expires_at", "valid"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "observation_id": {"type": "string", "format": "uuid"},
+    "account_id": {"type": "string", "pattern": "^[0-9]+$"},
+    "host_id": {"type": "string", "minLength": 1},
+    "environment": {"enum": ["SIMULATION", "PRODUCTION"]},
+    "key_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "valid": {"type": "boolean"}
+  },
+  "description": "Transport only SHA-256 fingerprint; never upload a local authorization Key."
+}

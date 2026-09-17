@@ -1,0 +1,11 @@
+[Unit]
+Description=Every five minutes Coordinator shadow soak probe
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=kitling-bigqmt-coordinator-soak.service
+
+[Install]
+WantedBy=timers.target

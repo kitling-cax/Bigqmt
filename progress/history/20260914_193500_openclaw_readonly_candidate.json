@@ -1,0 +1,19 @@
+{
+  "event_time": "2026-09-14T19:35:00+08:00",
+  "event": "OPENCLAW_READONLY_CANDIDATE_BUILT",
+  "release": "dist/openclaw-bigqmt-bundle-0.1.0-readonly",
+  "scope": "observer_readonly",
+  "tools": [
+    "bigqmt_get_fleet_status",
+    "bigqmt_get_executor_preview",
+    "bigqmt_get_project_progress"
+  ],
+  "orders_enabled": false,
+  "nas_written": true,
+  "nas_release": "\\\\192.0.2.236\\truenas\\kitling_QMT\\kitling_bigqmt\\releases\\openclaw\\candidate\\openclaw-bigqmt-bundle-0.1.0-readonly",
+  "nas_channel": "\\\\192.0.2.236\\truenas\\kitling_QMT\\kitling_bigqmt\\channels\\openclaw.json",
+  "nas_checksum_verification": "6/6 files matched SHA256",
+  "openclaw_installed": false,
+  "tests": "25 focused tests passed; stdio JSON-RPC probe passed",
+  "next_gate": "AP4 target-machine OpenClaw installation approval; no execution scope is included"
+}

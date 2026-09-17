@@ -1,0 +1,13 @@
+# Deliberately non-runnable promotion template. It is for a later separately
+# approved cutover after shadow acceptance; do not deploy it today.
+services:
+  coordinator:
+    image: kitling-bigqmt-coordinator:${BIGQMT_COORDINATOR_IMAGE_TAG:?set_image_tag}
+    container_name: kitling-bigqmt-coordinator
+    profiles: ["EXPLICIT_FUTURE_PROMOTION_ONLY"]
+    environment:
+      BIGQMT_COORDINATOR_MODE: REQUIRES_FUTURE_IMPLEMENTATION_AND_APPROVAL
+      BIGQMT_EXECUTION_WRITES_DISABLED: "1"
+      BIGQMT_LEASE_GRANTS_DISABLED: "1"
+      BIGQMT_INTENT_CONFIRM_DISABLED: "1"
+    read_only: true

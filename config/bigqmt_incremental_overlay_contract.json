@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "policy": "MISSING_ONLY_CANDIDATE_OVERLAY",
+  "target_lake": "C:/BigQMT/research/quant_data_lake",
+  "target_layers": {
+    "candidate": "_staging/<release_id>/raw_overlay",
+    "published_raw": "bronze/bars_raw",
+    "published_pit": "silver/bars_pit"
+  },
+  "source_roles": {
+    "miniqmt": "published historical primary while available",
+    "tushare": "published research fallback and independent reconciliation source",
+    "bigqmt": "broker-consistent cache, real-time and incremental candidate source"
+  },
+  "business_key": ["code", "trade_date", "period", "adjustment_mode"],
+  "canonical_fields": {
+    "code": "QMT code, e.g. 600519.SH",
+    "trade_date": "Asia/Shanghai completed bar date YYYY-MM-DD",
+    "period": "1d, 5m or 1m",
+    "open": "CNY per share/unit, raw unless adjustment_mode says otherwise",
+    "high": "CNY per share/unit",
+    "low": "CNY per share/unit",
+    "close": "CNY per share/unit",
+    "volume_lots": "hands/lots; BigQMT prohibited until measured against reference sources",
+    "amount_yuan": "CNY; BigQMT prohibited until measured against reference sources",
+    "adjustment_mode": "none/front/back; PIT is a separately derived layer",
+    "source": "miniqmt/tushare/bigqmt",
+    "available_at": "first research-available timestamp",
+    "source_release": "immutable source or cache snapshot identity",
+    "row_hash": "stable normalized business-row hash"
+  },
+  "unit_rules": {
+    "tushare": {"volume_lots": "vol as reported", "amount_yuan": "amount * 1000"},
+    "miniqmt": {"volume_lots": "measured, never assumed", "amount_yuan": "measured, never assumed"},
+    "bigqmt": {
+      "daily_1d": {
+        "volume_lots": "MEASURED_1_TO_1_WITH_SHARED_LAKE_VOLUME",
+        "amount_yuan": "MEASURED_SHARED_LAKE_RAW_AMOUNT_X_1000",
+        "evidence": "docs/66_bigqmt_daily_unit_baseline_2026-09-12.md"
+      },
+      "intraday_5m_1m": {
+        "volume_lots": "MEASURED_CROSS_PERIOD_QMT_DAILY_SUM_20260911",
+        "amount_yuan": "MEASURED_CROSS_PERIOD_QMT_DAILY_SUM_20260911",
+        "evidence": "docs/75_bigqmt_intraday_cache_vs_lake_status_2026-09-12.md"
+      }
+    }
+  },
+  "cleaning_rules": {
+    "raw_price_input": "BigQMT dividend_type=none only",
+    "front_back_input": "diagnostic_only_never_raw_or_pit_source",
+    "exact_duplicate": "retain one row only when normalized payload hashes are identical; otherwise quarantine",
+    "missing_values": "preserve as null with reason; never forward-fill OHLCV or amount",
+    "invalid_ohlc": "quarantine; never clip or manufacture prices",
+    "numeric_representation": "parse decimal values before canonical serialization"
+  },
+  "adjustment_and_pit_rules": {
+    "raw_layer": "stores unadjusted BigQMT bars with adjustment_mode=none only",
+    "factor_source": "reuse the shared-lake canonical factor/corporate-action chain; never infer factors from BigQMT front/back bars",
+    "pit_generation": "derive PIT separately after raw release validation; require available_at and source_version",
+    "required_evidence": ["factor_positive", "ex_date_window_reconciliation", "raw_to_pit_formula_check", "no_future_available_at"],
+    "failure_action": "BLOCKED_NO_RAW_PIT_OR_LATEST_UPDATE"
+  },
+  "decision_rules": {
+    "matching_published_key": "record provenance and reconciliation only; do not duplicate the bar",
+    "missing_published_key": "write BigQMT row only to candidate overlay; publish after all gates pass",
+    "conflicting_published_key": "quarantine with row-level comparison; do not overwrite",
+    "latest_pointer": "never update from a BigQMT candidate run"
+  },
+  "required_gates": [
+    "schema_and_business_key",
+    "ohlc_and_nonnegative_values",
+    "volume_and_amount_unit_evidence",
+    "cross_source_price_reconciliation",
+    "adjustment_and_pit_separation",
+    "freshness_and_trading_calendar",
+    "row_hash_and_manifest",
+    "candidate_release_approval"
+  ],
+  "safety": {"orders_enabled": false, "formal_account_read_only": true, "mode": "DRY_RUN_ONLY_UNTIL_ALL_GATES_PASS"}
+}

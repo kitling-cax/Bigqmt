@@ -1,0 +1,12 @@
+{
+  "name": "bigqmt-readonly",
+  "transport": "stdio",
+  "command": "py",
+  "args": ["-3.12", "scripts/openclaw_bigqmt_readonly_mcp.py"],
+  "working_directory": "<LOCAL_BIGQMT_ROOT>",
+  "scope": "observer",
+  "safety": {
+    "orders_enabled": false,
+    "token": "not required for this local read-only prototype; mandatory before any remote or write scope"
+  }
+}

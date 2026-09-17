@@ -1,0 +1,46 @@
+{
+  "snapshot_at": "2026-09-08T19:13:53+08:00",
+  "environment": "simulation",
+  "stage": "P06_SIMULATION_ORDERS",
+  "stage_status": "IN_PROGRESS_READ_ONLY_DIAGNOSIS",
+  "orders_enabled": false,
+  "order_intent_allowed": false,
+  "bridge": "RUNNING_READ_ONLY",
+  "account_scope": "90000001 simulation only",
+  "formal_environment": "NOT_DEPLOYED_READ_ONLY_ONLY",
+  "runtime_ownership": {
+    "production_runtime": "BIGQMT_TRAY_ONLY",
+    "codex_role": "development_validation_audit_only"
+  },
+  "verified_evidence": {
+    "ptrade_artifact_audit": "runtime_data/evidence/simulation/ptrade_v1_1_15_artifact_audit_20260908_174546.json",
+    "ptrade_position_replay": "runtime_data/evidence/simulation/ptrade_v1_1_15_state_replay_20260908_134253.json",
+    "qmt_risk_replay": "runtime_data/evidence/simulation/qmt_v1_1_15_risk_replay_parity_20260908_134831.json",
+    "p06_gate": "runtime_data/evidence/simulation/p06_artifact_only_gate_20260908_191158.json"
+  },
+  "passed": [
+    "P01 Redis",
+    "P02 QMT Bridge",
+    "P03 account/order/trade read-only access",
+    "P04 market-data freshness/recovery",
+    "P05 SQLite/JSONL runtime recovery",
+    "PTrade artifact integrity: 2077 log rows, 5281 trade rows, 2429 holding rows",
+    "PTrade position replay: 2077/2077 logged current positions contained",
+    "QMT risk replay: 83/83 comparable days matched"
+  ],
+  "unresolved": {
+    "daily_best_code_parity": "2010/2029",
+    "daily_score_parity": "2023/2029",
+    "explained_ptrade_freeze_exclusions": 7,
+    "data_or_eligibility_cases": 12,
+    "qmt_vs_research_lake_source_cases": 4,
+    "ptrade_per_security_dypre_matrix": "not available in current TXT/CSV/PNG artifacts"
+  },
+  "safety": [
+    "No QMT order or cancel method was called by the P06 diagnostic scripts.",
+    "Simulation orders remain disabled.",
+    "Formal environment remains read-only and not deployed.",
+    "Codex is not a runtime, order, scheduling, heartbeat, or recovery dependency."
+  ],
+  "next_gate": "Continue read-only source diagnosis. Do not create executable simulation order intent unless the evidence gap is resolved or explicitly accepted by the user, and local dry-run plus preflight pass."
+}

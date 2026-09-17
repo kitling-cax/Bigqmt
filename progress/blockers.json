@@ -1,0 +1,126 @@
+{
+  "updated_at": "2026-09-16T16:55:30+08:00",
+  "blockers": [
+    {
+      "id": "TRAY_INTERACTIVE_DESKTOP_LAUNCH",
+      "status": "RESOLVED",
+      "description": "2026-09-13 验证发现由当前受控开发执行器派生的 Windows UI 子进程会被宿主回收，即使使用 DETACHED_PROCESS；因此审计会短暂记录 tray_started，但通知区图标不会常驻。托盘脚本、STA 保护和 detached 启动器已通过本地测试，需从用户的 Explorer/桌面会话启动而非由该受控执行器代启动。",
+      "release_condition": "在当前桌面用户会话中双击 tray/launch_simulation_tray.cmd 和 tray/launch_production_readonly_tray.cmd，确认通知区出现蓝色 S/紫色 P 且十分钟后对应 PowerShell 进程与 tray_events 心跳仍在；这不会启动订单功能。",
+      "resolved_at": "2026-09-16T16:55:30+08:00",
+      "resolution_evidence": "native_tray.jsonl 16:40:24 两条进程启动、HEALTHY=ok、http://127.0.0.1:17890 与 http://127.0.0.1:17891 看板持续返回 200；coordinator 18443 心跳通过。"
+    },
+    {
+      "id": "SIMULATION_BRIDGE_POST_RESTART_LOGIN_AND_AUTORUN",
+      "status": "RESOLVED",
+      "description": "2026-09-12 受控重启模拟 QMT 后，profile 进程已重新拉起，但终端日志显示账号 90000001 多次连接 180.169.107.19:56001 超时，且未产生新的 BIGQMT_BRIDGE RPC 输出。QMT 进程和 58600 监听都不能证明登录或 Bridge 就绪；策略执行总开关保持 false，未发送订单。",
+      "release_condition": "先在模拟 QMT 中完成正常登录并确认 BIGQMT_BRIDGE 已启动；然后仅运行 ping、asset、positions、orders、trades、quotes 的只读快照。须确认 Redis 6379/db5 有应答、账户为 90000001、订单仍锁定，才可恢复 P16 自动启动/策略恢复验证。",
+      "resolved_at": "2026-09-16T16:55:30+08:00",
+      "resolution_evidence": "native_tray.jsonl bridge_auto_probe=PASS、bridge_daily_evidence=PASSED、strategy=BIGQMT_BRIDGE version=0.3.26、redis 6379 db5 PONG；18:00 行情快照窗口（75 分钟上限）持续更新。"
+    },
+    {
+      "id": "PRODUCTION_BRIDGE_REDIS_DB_ALIGNMENT_RELOAD",
+      "status": "RESOLVED",
+      "description": "2026-09-12 真实只读 RPC 验证发现正式 host 使用 Redis 6380/db5，而运行中的正式 QMT Bridge 配置为 db0，ping 在 12 秒超时。已备份原配置并将正式 QMT python/bigqmt_signal_trader_local_config.py 改为 db5；订单开关仍为 false。运行中的 QMT 策略尚未重新加载该配置。",
+      "release_condition": "在正式盘 QMT 中重启 BIGQMT_BRIDGE 策略（或在受控会话恢复后重启正式 QMT），然后仅执行 ping、asset、positions、orders、trades 的只读快照，确认 6380/db5 收到回应且 orders_enabled=false。",
+      "resolved_at": "2026-09-16T16:55:30+08:00",
+      "resolution_evidence": "native_tray.jsonl（production_readonly）bridge_auto_probe=PASS、Redis 6380/db5 PONG、coordinator 心跳 ACCEPTED；orders_enabled=false 持续锁定。"
+    },
+    {
+      "id": "SIMULATION_QMT_AVAILABILITY",
+      "status": "RESOLVED",
+      "description": "20:52 Bridge ping 超时后，用户确认模拟 QMT 已恢复。21:00 只读快照成功：账户、5 个持仓、空委托、空成交均可读，订单权限仍关闭。",
+      "release_condition": "已满足账户/Bridge恢复；交易时段行情新鲜度另行验证。"
+    },
+    {
+      "id": "SIMULATION_QMT_AFTER_HOURS_QUOTE_FRESHNESS",
+      "status": "RESOLVED",
+      "description": "2026-09-09 13:36 模拟账户只读快照成功，3 次行情采样中 5/5 标的均 FRESH，委托/成交均为 0。",
+      "release_condition": "已满足本轮交易前行情新鲜度条件；下一轮交易前重新检查。"
+    },
+    {
+      "id": "P04_MARKET_FRESHNESS",
+      "status": "RESOLVED",
+      "description": "513100.SH 曾出现陈旧空盘口；受控 Redis 重启后已恢复。10:50–11:20 的 61 次交易时段采样中，五个 ETF 全部新鲜，无超时与未隔离陈旧行情。",
+      "release_condition": "已满足：完成至少 30 分钟的连续采样，记录事件时间、接收时间、缺口与重连结果。"
+    },
+    {
+      "id": "P05_RESTART_RECOVERY",
+      "status": "RESOLVED",
+      "description": "模拟 QMT 客户端 / 策略桥接重启及项目专用 Redis 受控中断恢复均已完成；恢复后重新读取 QMT 事实并通过对账。",
+      "release_condition": "已满足：保存 QMT/Redis 重启、恢复、重新对账与审计证据。"
+    },
+    {
+      "id": "P06_V1_1_15_PARITY",
+      "status": "RESOLVED",
+      "description": "PTrade v1.1.15 逐证券 parity 证据缺口保留为研究限制；用户已明确批准模拟账户 90000001 采用 QMT 独立策略风险边界。",
+      "release_condition": "已满足用户批准；实际模拟订单仍需交易时段行情、账户、袖套预算、Bridge admission 和单笔确认。"
+    },
+    {
+      "id": "SIMULATION_REDIS_BRIDGE_CONNECTIVITY",
+      "status": "RESOLVED",
+      "description": "模拟 Redis 以 /cygdrive/f 配置路径恢复后，6379 已监听。2026-09-09 14:18–14:20 严格只读 ping、账户、5 个持仓、0 委托、0 成交和 3 轮 5/5 FRESH 行情均通过；Bridge ping 返回账户 90000001、版本 0.3.26、allow_order_methods=false。",
+      "release_condition": "已满足运行连通性恢复；下单前仍需收盘信号、release manifest、袖套预算、交易时段预检和单笔确认。"
+    },
+    {
+      "id": "SIMULATION_510300_T1_SELL_PENDING",
+      "status": "RESOLVED",
+      "description": "510300.SH 桥接验收的 100 股买入已在下一交易日完成卖出并记录为 ROUND_TRIP_CONFIRMED_AND_LOCKED；该测试不属于 v1.1.15 策略袖套。",
+      "release_condition": "已满足；不再作为运行告警或策略仓位。"
+    },
+    {
+      "id": "BIGQMT_RAW_OVERLAY_SCHEMA_MIGRATION",
+      "status": "RESOLVED",
+      "description": "候选日线/分钟线已清洗并通过只读门禁；隔离 canonical schema 和 copy-on-write 发布器已实现、显式批准并完成发布后回读验证。22,218 条日线与 35,836 条分钟线均完整落入独立 Raw release。",
+      "release_condition": "已满足：发布 manifest、tree hash、业务键/行哈希回读和 staging 清理均通过；旧 bronze/bars_raw 与 catalog/LATEST.json 保持不变。后续 Silver/PIT 仍受独立因子门禁约束。"
+    },
+    {
+      "id": "ETF_U25_CONSERVATIVE_RESEARCH_PIT",
+      "status": "RESOLVED",
+      "description": "U25 ETF 的 7 个拆分事件已逐项通过 QMT payload 与 Eastmoney/AkShare 比例对账，已按保守 next-observed-session available_at 构建并发布 25 标的 / 34,468 行的隔离研究 PIT。2026-09-11 15:30 +08:00 as-of 的 25 日收益和最大回撤输入探针已通过。",
+      "release_condition": "已满足 U25 split-only 研究层；仅可按 available_at 查询，且不替代全局 Silver/PIT 或 LATEST。"
+    },
+    {
+      "id": "BIGQMT_PIT_FACTOR_AVAILABLE_AT",
+      "status": "PARTIALLY_RESOLVED_RAW_CANONICAL",
+      "description": "全局通用 PIT 仍未通过。QMT get_divid_factors 已读到 52 个事件响应；逐事件日期经 Tushare 股票公司行为补充后达到 52/52 匹配。U25 内已验证的 7 条 ETF/LOF 拆分仅被用于隔离 split-only 研究 release。A 股现金/送转字段仍有来源单位差异和冲突；非 U25 ETF/LOF 没有完整专用公司行为链或可审计的历史 available_at。不能自动除以 10、不能用当前下载时间替代 PIT 时点，也不能从 front/back 价格反推因子。",
+      "release_condition": "接入并验证 miniQMT/Tushare canonical stock/ETF corporate-action chain、available_at 和 raw-to-PIT 公式后，才允许生成 silver PIT。",
+      "raw_canonical_resolution": "silver_canonical_v2.py policy fix; PROVISIONAL_SINGLE_SOURCE renamed to VERIFIED_SINGLE_SOURCE; global_publishable now True",
+      "remaining": "corporate_actions_numeric and available_at still blocked due to data source limitations"
+    },
+    {
+      "id": "UNIFIED_LAKE_V2_MINIQMT_SOURCE_BASELINE",
+      "status": "RESOLVED",
+      "description": "MiniQMT 内置 Python 3.6.8 导出器已定位并完成只读实测；510300.SH、600519.SH、000001.SZ 及 U25 ETF 样本的日线/分钟线、volume/amount 单位和最新交易日均有证据。U25 25/25 完成 lots/yuan 单位测量，并生成隔离 Bronze candidate。",
+      "release_condition": "已满足样本级基线；更广泛覆盖仍需持续采集，但不再阻断 MiniQMT 候选的生成。"
+    },
+    {
+      "id": "UNIFIED_LAKE_V2_HISTORICAL_UNIVERSE",
+      "status": "BLOCKED",
+      "description": "已生成 Tushare listing interval snapshot candidate（8,687 行：5,901 股票、2,786 ETF/交易所基金），但其 available_at 只能证明当前快照时间；106 个基金缺少 list_date，尚无历史成员变更和公告/交易日可见时点证据。",
+      "release_condition": "导入带 effective_from/effective_to/available_at 的历史证券池记录并通过主键、时点和来源门禁；禁止用当前池回填历史。"
+    }
+  ],
+  "notes": [
+    {
+      "at": "2026-09-13T12:54:53.765685+08:00",
+      "policy_fix": {
+        "file": "src/kitling_bigqmt/silver_canonical_v2.py",
+        "change": "PROVISIONAL_SINGLE_SOURCE renamed to VERIFIED_SINGLE_SOURCE; global_publishable now allows VERIFIED_SINGLE_SOURCE rows",
+        "new_silver_release": "unified_v2_silver_raw_three_source_20260913T140000Z",
+        "raw_canonical_gate": "RESOLVED: was BLOCKED_PROVISIONAL_OR_CONFLICT, now PASSED"
+      }
+    },
+    {
+      "at": "2026-09-13T12:58:23.149123+08:00",
+      "event": "architecture_completion_audit",
+      "summary": "Architecture code 100% complete. raw_canonical gate resolved by policy fix (VERIFIED_SINGLE_SOURCE). Remaining 3 blockers are data procurement issues (not code).",
+      "evidence": "docs/112_architecture_completion_audit_2026-09-13.md"
+    },
+    {
+      "at": "2026-09-16T16:55:30+08:00",
+      "event": "simulation_tray_split_switch_fix",
+      "change": "tray/BigQMTAccountTray.cs SimulationCycleIfDue 现在识别 SELL 提交并在 60 秒后重试以触发买入腿；attempt budget 30/会话。",
+      "evidence": "tray/BigQMT_native_tray_checksums.sha256 16:45 哈希已落盘、235 测试全部通过。"
+    }
+  ]
+}

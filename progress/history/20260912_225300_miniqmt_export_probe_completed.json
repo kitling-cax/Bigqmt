@@ -1,0 +1,17 @@
+{
+  "recorded_at": "2026-09-12T22:53:00+08:00",
+  "stage": "P11_DATA_LAKE",
+  "stage_status": "IN_PROGRESS",
+  "action": "MiniQMT embedded Python read-only export and host validation",
+  "embedded_python": "C:/BigQMT/work/国金QMT交易端模拟/bin.x64/pythonw.exe (3.6.8)",
+  "codes_requested": ["510300.SH", "600519.SH"],
+  "period": "1d",
+  "result": {"600519.SH": 9, "510300.SH": 0},
+  "observed_units": {"volume": "lots_measured", "amount": "cny_measured", "scope": "600519.SH daily probe only"},
+  "host_gate": "CANDIDATE_VALIDATED",
+  "orders_enabled": false,
+  "broker_calls": false,
+  "lake_write": false,
+  "global_latest_updated": false,
+  "next": "refresh MiniQMT cache, retry 510300.SH and collect 1m/5m; then build three-source Bronze candidate"
+}

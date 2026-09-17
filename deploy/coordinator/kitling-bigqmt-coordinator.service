@@ -1,0 +1,24 @@
+[Unit]
+Description=Kitling BigQMT read-only Coordinator bootstrap
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bigqmt-coordinator
+Group=bigqmt-coordinator
+WorkingDirectory=/opt/bigqmt-coordinator/current
+Environment=BIGQMT_PROJECT_ROOT=/opt/bigqmt-coordinator/current
+Environment=BIGQMT_COORDINATOR_BIND=192.0.2.121
+Environment=BIGQMT_COORDINATOR_PORT=18443
+ExecStart=/opt/bigqmt-coordinator/venv/bin/python /opt/bigqmt-coordinator/current/scripts/coordinator/serve.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kitling-bigqmt-coordinator
+
+[Install]
+WantedBy=multi-user.target

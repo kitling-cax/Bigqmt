@@ -1,0 +1,35 @@
+# Template only. Do not run against the authoritative 18443 service.
+services:
+  coordinator-shadow:
+    image: kitling-bigqmt-coordinator:${BIGQMT_COORDINATOR_IMAGE_TAG:?set_image_tag}
+    container_name: kitling-bigqmt-coordinator-shadow
+    restart: unless-stopped
+    ports:
+      - "192.0.2.121:18666:18443"
+    environment:
+      BIGQMT_COORDINATOR_MODE: SHADOW_READONLY
+      BIGQMT_EXECUTION_WRITES_DISABLED: "1"
+      BIGQMT_LEASE_GRANTS_DISABLED: "1"
+      BIGQMT_INTENT_CONFIRM_DISABLED: "1"
+      BIGQMT_COORDINATOR_DB: /state/coordinator.sqlite3
+      BIGQMT_COORDINATOR_STATE_DIR: /state
+      BIGQMT_COORDINATOR_PHASE_FILE: /config/progress.json
+      BIGQMT_FACT_INGEST_ENABLED: "1"
+      BIGQMT_FACT_TRUSTED_HOSTS_FILE: /secrets/fact-identities.json
+    volumes:
+      - /var/lib/kitling-bigqmt-coordinator-shadow:/state
+      - /etc/kitling-bigqmt-coordinator-shadow:/config:ro
+      - /etc/kitling-bigqmt-coordinator-shadow/fact-identities.json:/secrets/fact-identities.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kitling_bigqmt://config/schemas/machine.local.schema.json",
+  "title": "BigQMT machine.local.json single-point override",
+  "description": "Single machine-local override file. All keys are optional (partial override); missing keys fall back to per-config absolute defaults. Unknown keys are allowed for forward compatibility. Must never contain account passwords or order-authorization fields.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "comment": {"type": "string"},
+    "data_directory": {"type": "string", "minLength": 1},
+    "coordinator": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "endpoint": {"type": "string", "minLength": 1, "format": "uri"},
+        "host_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "environments": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "simulation": {"$ref": "#/$defs/environment"},
+        "production_readonly": {"$ref": "#/$defs/environment"}
+      }
+    }
+  },
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "qmt_root": {"type": "string", "minLength": 1},
+        "bin_x64": {"type": "string", "minLength": 1},
+        "redis": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "host": {"type": "string", "minLength": 1},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "db": {"type": "integer", "minimum": 0},
+            "password": {"type": "string"}
+          }
+        },
+        "dashboard_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "ready_port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    }
+  }
+}

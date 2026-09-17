@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "kind": "bigqmt_pit_unit_contract",
+  "status": "DRAFT_BLOCKED_PENDING_SOURCE_CONFIRMATION",
+  "purpose": "Define units before any Silver/PIT transformation; no conversion is implicit.",
+  "qmt_divid_factors": {
+    "cash_dividend": {"unit": "yuan_per_share", "payload_index": 0, "basis": "xtquant_big_convert documented BigQMT API"},
+    "bonus_shares": {"unit": "shares_per_share", "payload_index": 1},
+    "transfer_shares": {"unit": "shares_per_share", "payload_index": 2},
+    "rights_ratio": {"unit": "shares_per_share", "payload_index": 3},
+    "rights_price": {"unit": "yuan_per_share", "payload_index": 4},
+    "reform_flag": {"unit": "boolean_or_integer", "payload_index": 5},
+    "cumulative_factor": {"unit": "dimensionless", "payload_index": 6, "status": "must_be_rebuilt_or_independently_verified"}
+  },
+  "raw_bars": {
+    "daily": {"volume": "lots", "amount": "yuan"},
+    "intraday": {"volume": "lots", "amount": "yuan"},
+    "adjustment_mode": "none",
+    "rule": "retain source values; normalization is a separate Silver operation"
+  },
+  "external_sources": {
+    "tushare_dividend": {"cash_dividend_unit": "must_confirm_per_share_or_per_10_shares", "observed": "exact QMT matches for 21 stock events; no blanket conversion"},
+    "alphaforge2_eastmoney": {"cash_dividend_unit": "UNRESOLVED_CODE_OR_ENDPOINT_PROFILE", "observed": "24 events external cash value approximately 10x QMT; 2 source conflicts retained"},
+    "akshare_etf_sina": {"value_semantics": "cumulative_distribution_or_endpoint_specific", "status": "not accepted as event-level numeric factor"}
+  },
+  "gates": {
+    "explicit_unit_metadata": "BLOCKED",
+    "cross_source_numeric_reconciliation": "PARTIAL",
+    "silver_pit_publish": "BLOCKED"
+  },
+  "safety": {"lake_write": false, "global_latest_updated": false, "orders_enabled": false}
+}

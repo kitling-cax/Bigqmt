@@ -1,0 +1,97 @@
+{
+  "schema_version": 2,
+  "name": "kitling_unified_market_data_lake_v2",
+  "status": "FOUNDATION_ACTIVE_NO_GLOBAL_PIT_RELEASE",
+  "lake_root": "C:/BigQMT/research/quant_data_lake/v2",
+  "purpose": "A source-preserving market-data lake for ETF and A-share research. This contract never grants broker or order capability.",
+  "storage_roles": {
+    "parquet": "immutable source facts and immutable research releases",
+    "duckdb": "read-only quality, factor and backtest query engine over Parquet",
+    "questdb": "rebuildable hot time-series projection only",
+    "redis": "real-time transport and latest snapshots only; never a historical research authority",
+    "sqlite_wal": "runtime orders, fills, sleeve accounting and recovery only; never a market-data research authority",
+    "json": "release manifests, source registry, catalog pointers and evidence only"
+  },
+  "source_registry": {
+    "miniqmt": {
+      "role_now": "primary_daily_history_while_available_and_measured",
+      "role_after_retirement": "comparison_baseline_only",
+      "runtime_adapter": "C:/BigQMT/work/国金QMT交易端模拟/bin.x64/Lib/site-packages/xtquant/xtdata.py",
+      "runtime_note": "API runtime is located; historical data must still be fetched through a read-only xtdata adapter and written as source facts",
+      "allowed_datasets": ["bars_1d", "bars_1m", "bars_5m"],
+      "volume_unit": "UNVERIFIED_MUST_MEASURE",
+      "amount_unit": "UNVERIFIED_MUST_MEASURE",
+      "measured_unit_scope": "2026-09-12 simulation embedded probe only: 510300.SH/600519.SH/000001.SZ volume=lots, amount=yuan by amount/close/volume≈100 check; do not generalize beyond sampled build until broader sample gate passes",
+      "measured_unit_evidence": "docs/104_miniqmt_embedded_export_probe_2026-09-12.md",
+      "export_contract": "deploy/miniqmt/export_miniqmt_bars_v2.py",
+      "host_import_contract": "normalize_miniqmt requires measured volume_unit and amount_unit"
+    },
+    "tushare": {
+      "role_now": "history_fallback_and_independent_reconciliation",
+      "allowed_datasets": ["bars_1d", "stock_corporate_actions", "universe_metadata"],
+      "daily_volume_unit": "lots",
+      "daily_amount_unit": "thousand_cny",
+      "normalization": {"volume_lots_multiplier": 1, "amount_yuan_multiplier": 1000}
+    },
+    "bigqmt": {
+      "role_now": "broker_account_facts_realtime_and_candidate_history",
+      "allowed_datasets": ["bars_1d", "bars_1m", "bars_5m", "broker_account_facts", "qmt_action_diagnostics"],
+      "daily_volume_unit": "lots_measured",
+      "daily_amount_unit": "cny_measured",
+      "history_promotion": "only after source, unit, freshness and PIT gates pass"
+    }
+  },
+  "datasets": {
+    "bronze_bars": {
+      "path": "bronze/bars/source=<source>/asset_class=<stock|etf>/frequency=<1d|1m|5m>/year=<yyyy>/month=<mm>",
+      "required_columns": ["code", "bar_time", "trade_date", "frequency", "asset_class", "open", "high", "low", "close", "raw_volume", "raw_amount", "raw_volume_unit", "raw_amount_unit", "source", "source_release", "received_at", "ingested_at", "row_hash"],
+      "rule": "append-only source facts; adjusted prices must never be labelled raw"
+    },
+    "corporate_actions_v2": {
+      "path": "bronze/corporate_actions/source=<source>/asset_class=<stock|etf>/year=<yyyy>",
+      "required_columns": ["code", "asset_class", "action_type", "ex_date", "announcement_at", "available_at", "cash_per_share", "bonus_ratio", "transfer_ratio", "rights_ratio", "rights_price", "source", "source_endpoint", "unit_contract_version", "evidence_hash", "row_hash"],
+      "rule": "one source fact per row; unknown numeric fields and date-only availability remain explicit and cannot enter global PIT"
+    },
+    "silver_raw_canonical_v2": {
+      "path": "silver/raw_canonical/releases/<release_id>",
+      "required_columns": ["code", "bar_time", "trade_date", "frequency", "asset_class", "open", "high", "low", "close", "volume_lots", "amount_yuan", "source_selected", "source_candidates", "quality_status", "available_at", "row_hash"],
+      "rule": "only VERIFIED rows are eligible for a global research release; CONFLICT and PROVISIONAL rows remain candidate-only"
+    },
+    "silver_pit_v2": {
+      "path": "silver/pit_v2/releases/<release_id>",
+      "required_columns": ["code", "trade_date", "frequency", "asset_class", "open", "high", "low", "close", "open_raw", "high_raw", "low_raw", "close_raw", "adjustment_factor", "adjustment_method", "bar_available_at", "factor_available_at", "available_at", "source_version", "row_hash"],
+      "rule": "factor is rebuilt from canonical raw bars and validated actions; all research reads must filter available_at <= asof"
+    },
+    "universe_pit_v2": {
+      "path": "silver/universe_pit_v2/releases/<release_id>",
+      "required_columns": ["code", "asset_class", "effective_from", "effective_to", "available_at", "source", "row_hash"],
+      "rule": "current security lists must never be used to backfill a historical universe"
+    }
+  },
+  "release_policy": {
+    "copy_on_write": true,
+    "global_latest_default": false,
+    "required_gates": ["stock_raw", "etf_raw", "pit_adjustment", "universe_pit", "source_freshness", "service_health", "manifest_hash"],
+    "latest_update": "requires a complete immutable candidate, directory-level atomic publish, expected-previous-release comparison, catalog lock, manifest/tree-hash roundtrip and explicit approval",
+    "failure_behavior": "CANDIDATE_ONLY or BLOCKED; preserve previous approved research release"
+  },
+  "research_channels": {
+    "U25_ETF_RESEARCH_PIT": {
+      "current_release": "C:/BigQMT/research/quant_data_lake/silver/_bigqmt_research_pit_releases/bigqmt_etf_research_pit_20260913_145313",
+      "scope": "25 ETF/LOF split-only conservative PIT; cash distributions are excluded from the v1.1.15 research return series and retained as an explicit limitation",
+      "global_default": false
+    },
+    "GLOBAL_PIT_V2": {
+      "current_release": null,
+      "state": "BLOCKED_CANONICAL_ACTIONS_AND_AVAILABLE_AT",
+      "global_default": false
+    }
+  },
+  "safety": {
+    "legacy_bronze_modified": false,
+    "legacy_silver_modified": false,
+    "legacy_catalog_latest_modified": false,
+    "orders_enabled": false,
+    "broker_calls": false
+  }
+}

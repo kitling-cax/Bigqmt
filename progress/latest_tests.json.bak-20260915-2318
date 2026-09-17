@@ -1,0 +1,1340 @@
+{
+  "updated_at": "2026-09-15T20:36:00+08:00",
+  "environment": "simulation",
+  "tests": [
+    {
+      "name": "qmt_redis_rpc_readonly",
+      "status": "PASSED",
+      "evidence": "docs/08_simulation_rpc_config_2026-09-08.md",
+      "details": [
+        "ping",
+        "asset",
+        "positions",
+        "orders",
+        "trades",
+        "full_tick"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "runtime_state_snapshot",
+      "status": "PASSED",
+      "evidence": "docs/09_p05_runtime_state_snapshot_2026-09-08.md",
+      "details": [
+        "SQLite WAL",
+        "JSONL audit",
+        "5 positions",
+        "5 quote snapshots"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "continuous_quote_collection",
+      "status": "ATTENTION",
+      "evidence": "docs/10_p04_p05_continuity_recovery_2026-09-08.md",
+      "details": [
+        "3 cycles",
+        "4 fresh ETF ticks",
+        "513100.SH stale and blocked"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "host_restart_reconciliation",
+      "status": "PASSED",
+      "evidence": "docs/10_p04_p05_continuity_recovery_2026-09-08.md",
+      "details": [
+        "broker facts re-read",
+        "5 position quantities unchanged",
+        "orders/trades empty"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "qmt_restart_recovery",
+      "status": "PASSED",
+      "evidence": "docs/10_p04_p05_continuity_recovery_2026-09-08.md",
+      "details": [
+        "BIGQMT_REDIS_DRYRUN restarted",
+        "QMT authoritative reconciliation passed",
+        "positions unchanged",
+        "orders/trades empty"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "redis_restart_recovery",
+      "status": "PASSED",
+      "evidence": "docs/10_p04_p05_continuity_recovery_2026-09-08.md",
+      "details": [
+        "project-owned Redis restarted",
+        "AOF replay completed",
+        "QMT bridge automatically resumed read-only RPC",
+        "QMT reconciliation passed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "quote_health_after_redis_recovery",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/qmt_quote_health_after_redis_recovery_2026-09-08_1031.json",
+      "details": [
+        "5 samples",
+        "5 ETF symbols fresh",
+        "no blocked symbol",
+        "no third-party fallback"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "quote_health_30m_initial_attempt",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_quote_health_30m_2026-09-08_1034.stderr.log",
+      "details": [
+        "read-only get_full_tick timeout",
+        "initial sampler exited before completion",
+        "no order methods were called",
+        "retry uses incremental persistence"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "quote_health_30m_retry",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/qmt_quote_health_30m_retry_2026-09-08_1050.json",
+      "details": [
+        "61 samples",
+        "10:50–11:20 Asia/Shanghai",
+        "5 ETF symbols fresh",
+        "zero timeouts",
+        "zero blocked symbols"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "dryrun_order_intent_idempotency",
+      "status": "PASSED",
+      "evidence": "tests/test_state_store.py",
+      "details": [
+        "first intent recorded locally as PLANNED",
+        "identical retry returned DUPLICATE",
+        "changed payload under same request_id rejected",
+        "orders_enabled=true rejected"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "qmt_historical_market_data_normalization",
+      "status": "PASSED",
+      "evidence": "tests/test_market_data.py",
+      "details": [
+        "DataFrame dict-of-lists envelope",
+        "row-list envelope",
+        "duplicate/malformed rows fail closed",
+        "26/26 U25+fallback history reads succeeded"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_pure_reproduction_core",
+      "status": "PASSED",
+      "evidence": "tests/test_v1_1_15_reproduction.py",
+      "details": [
+        "legacy weighted log regression",
+        "SMA4 and 5% switch",
+        "risk priority",
+        "freeze and explicit virtual-fill state"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_qmt_signal_probe",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_signal_probe_20260908_123444.json",
+      "details": [
+        "2015 warm-up history",
+        "26/26 securities",
+        "front/back/none A-B probes",
+        "virtual fills are not execution results"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_ptrade_signal_parity",
+      "status": "NOT_PASSED",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_signal_probe_20260908_123444_vs_ptrade.json",
+      "details": [
+        "PTrade log 327 signals",
+        "QMT probe 331 signals",
+        "exact tuple matches 11",
+        "QMT front/back/none not proven equivalent to PTrade dypre"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "readonly_safety_after_v1_1_15_probe",
+      "status": "PASSED",
+      "evidence": "simulation Redis RPC 2026-09-08 13:00",
+      "details": [
+        "ping allow_order_methods=false",
+        "orders=[]",
+        "trades=[]"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_daily_score_parity",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_daily_score_parity_20260908_132104.json",
+      "details": [
+        "PTrade scored days 2029",
+        "best-code matches 2010",
+        "PTrade best-score matches 2023",
+        "remaining differences require state/data diagnosis"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_ptrade_fill_state_replay",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/ptrade_v1_1_15_state_replay_20260908_134253.json",
+      "details": [
+        "5281 trade rows",
+        "653 entry/exit events",
+        "2077/2077 logged current symbols contained in replayed positions",
+        "weighted entry costs reconstructed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_qmt_raw_risk_replay",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_risk_replay_parity_20260908_134831.json",
+      "details": [
+        "83 comparable risk days",
+        "83/83 risk reasons matched",
+        "daily drop/drawdown/take-profit priority matched",
+        "real reconstructed entry cost used"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_daily_score_parity_back_ab",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_daily_score_parity_20260908_135401.json",
+      "details": [
+        "back result identical to front",
+        "best-code matches 2010/2029",
+        "best-score matches 2023/2029",
+        "switching QMT front/back does not resolve rank differences"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "simulation_order_authorization_safety_recheck",
+      "status": "PASSED",
+      "evidence": "simulation Redis RPC 2026-09-08 13:58",
+      "details": [
+        "account 90000001",
+        "ping allow_order_methods=false",
+        "orders=[]",
+        "trades=[]",
+        "orders_enabled remains false",
+        "formal account remains disallowed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_rank_difference_diagnosis",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_rank_difference_diagnosis_20260908_140836.json",
+      "details": [
+        "19 ordinary best-code differences",
+        "7 PTrade freeze exclusions",
+        "12 data-or-eligibility differences",
+        "6 score-value differences",
+        "audit only; no order intent"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "v1_1_15_lake_vs_qmt_factor_probe",
+      "status": "ATTENTION",
+      "evidence": "runtime_data/evidence/simulation/qmt_v1_1_15_lake_vs_qmt_factor_probe_20260908_142409.json",
+      "details": [
+        "25 difference cases",
+        "21 QMT-front/lake-raw score matches",
+        "12/12 rank-data cases match lake raw",
+        "4 QMT-vs-lake source cases remain",
+        "read-only; research lake not promoted to trading source"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "redis_recovery_after_parity_probe",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/redis_recovery_after_parity_probe_20260908_1537.json",
+      "details": [
+        "AOF base/incremental replay completed",
+        "RPC ping restored",
+        "allow_order_methods=false",
+        "orders=[]",
+        "trades=[]",
+        "no order/cancel method called"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_source_audit",
+      "status": "PASSED",
+      "evidence": "ptrade-strategy-engineering audit_ptrade_source.py 2026-09-08",
+      "details": [
+        "syntax_ok=true",
+        "no findings",
+        "strategy constants and lifecycle functions inspected",
+        "frozen baseline source unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_log_audit",
+      "status": "PASSED",
+      "evidence": "ptrade-strategy-engineering analyze_ptrade_log.py 2026-09-08",
+      "details": [
+        "327 live signals",
+        "5281 attributable fills",
+        "no risk findings",
+        "log contains no per-security score/eligibility matrix"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_score_matrix_parser",
+      "status": "PASSED",
+      "evidence": "tests/test_ptrade_score_matrix.py",
+      "details": [
+        "UTF-16 diagnostic log parsing",
+        "25-row completeness validation",
+        "malformed/incomplete matrix fails closed",
+        "baseline log correctly reported INCOMPLETE",
+        "orders_enabled remains false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_diagnostic_copy_readiness",
+      "status": "ATTENTION",
+      "evidence": "staging/ptrade_diagnostics/v1_1_15_score_matrix.patch",
+      "details": [
+        "independent copy only",
+        "frozen v1.1.15 baseline untouched",
+        "waiting for PTrade-produced SCORE_MATRIX log",
+        "no order/cancel method called"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_artifact_inventory",
+      "status": "PASSED",
+      "evidence": "C:/BigQMT/research/PTtrade策略编辑器/ptrade策略项目/S10-D1_低频动量轮动_RC1-RC2/5日回测/持有5天v1.1.15_长期",
+      "details": [
+        "UTF-16 TXT log present",
+        "trade-detail CSV present",
+        "holdings CSV present",
+        "PNG snapshots present",
+        "no SCORE_MATRIX export found",
+        "artifact-only parity path selected",
+        "orders_enabled remains false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "ptrade_v1_1_15_artifact_only_audit",
+      "status": "PASSED",
+      "evidence": "runtime_data/evidence/simulation/ptrade_v1_1_15_artifact_audit_20260908_174546.json",
+      "details": [
+        "2077 log rows",
+        "5281 trade rows",
+        "2429 holdings rows",
+        "last holdings day 20260902",
+        "replay reference day 20260831",
+        "last-day position quantity mismatch 0",
+        "SCORE_MATRIX absent and recorded as evidence gap"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p06_artifact_only_gate",
+      "status": "BLOCKED",
+      "evidence": "runtime_data/evidence/simulation/p06_artifact_only_gate_20260909_105153.json",
+      "details": [
+        "PTrade artifact integrity passed",
+        "position replay passed",
+        "83/83 risk replay matched",
+        "daily best parity 2010/2029",
+        "daily score parity 2023/2029",
+        "12 data-or-eligibility cases and 4 source cases unresolved",
+        "order_intent_allowed=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "simulation_qmt_readonly_snapshot_after_broker_disconnect",
+      "status": "BLOCKED",
+      "evidence": "progress/history/20260908_205321_simulation_qmt_broker_disconnected.json",
+      "details": [
+        "user reported broker-disconnected simulation QMT",
+        "run_readonly_snapshot ping timed out",
+        "no snapshot persisted",
+        "no order/cancel method called",
+        "orders_enabled remains false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "offline_dryrun_admission_and_budget_guards",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/dryrun_orders.py; tests/test_state_store.py",
+      "details": [
+        "requires preflight and parity admission",
+        "BUY checks sleeve cash and fee",
+        "SELL checks strategy ownership and broker availability",
+        "orders_enabled=true rejected",
+        "no QMT or Redis dependency"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "read_only_dashboard_candidate",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/dashboard_status.py; scripts/run_local_dashboard.py; tests/test_dashboard_status.py",
+      "details": [
+        "loopback-only server",
+        "read-only health/status endpoints",
+        "no order actions exposed",
+        "surfaces active blockers and runtime ownership"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "simulation_qmt_recovery_after_hours",
+      "status": "PASSED",
+      "evidence": "progress/history/20260908_210053_simulation_qmt_reconnected_after_hours.json",
+      "details": [
+        "read-only snapshot run_id 9ee0e69261c4467e82eba558177426c8",
+        "5 positions",
+        "orders/trades empty",
+        "allow_order_methods=false",
+        "after-hours quote freshness intentionally BLOCKED"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "project_gated_local_dryrun",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/dryrun_runtime.py; scripts/run_dryrun_from_json.py; staging/dryrun/sample_v1_1_15_buy_intent.json",
+      "details": [
+        "project status overrides caller environment/order/admission fields",
+        "current preflight BLOCKED rejects sample",
+        "no dryrun intent recorded on project-gate rejection",
+        "broker_call_made=false",
+        "no QMT RPC dependency"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "multi_strategy_sleeve_accounting_offline_core",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/sleeve_accounting.py; tests/test_sleeve_accounting.py; docs/14_strategy_sleeve_accounting_2026-09-08.md",
+      "details": [
+        "strategy A initial capital 100000",
+        "strategy B initial capital 1000000",
+        "independent cash/positions/NAV/compounding",
+        "fee-aware weighted cost and realized PnL",
+        "broker total equals external baseline plus sleeve positions",
+        "no QMT/Redis/order dependency"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_bridge_unified_execution_admission",
+      "status": "PASSED",
+      "evidence": "tests/test_bridge_execution_admission.py; staging/qmt_bridge_simulation/BIGQMT_BRIDGE.py; docs/15_bigqmt_bridge_unified_release_2026-09-09.md",
+      "details": [
+        "single bridge code path supports simulation and production capability",
+        "simulation and production defaults are fail-closed",
+        "simulation requires environment/account/strategy/preflight/parity/confirmation gates",
+        "production additionally requires simulation_verified and independent production approval",
+        "candidate is not yet deployed into QMT"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_bridge_rc3_package_and_formal_readonly_whitelist",
+      "status": "PASSED",
+      "evidence": "tests/test_bridge_execution_admission.py; dist/kitling-bigqmt-bridge-20260909-rc3",
+      "details": [
+        "33/33 local tests passed",
+        "simulation and formal ZIP manifests each verify 59 tracked files",
+        "formal account binding is local-only and masked in progress",
+        "formal RPC order/cancel methods are absent from the strict whitelist",
+        "all execution gates remain BLOCKED"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "formal_qmt_bridge_readonly_snapshot",
+      "status": "PASSED",
+      "evidence": "runtime_data/audit/production/2026-09-09/readonly_snapshot.jsonl; run_id 0f20476b2f7d4adaaa6aaaeb60b8844b",
+      "details": [
+        "formal Bridge ping passed",
+        "formal account is bound and masked in progress",
+        "1 broker position read",
+        "orders/trades empty",
+        "one fresh QMT full-tick read",
+        "allow_order_methods=false",
+        "Redis is isolated at 127.0.0.1:6380 DB 5"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p06b_project_gated_dryrun_recheck",
+      "status": "PASSED",
+      "evidence": "scripts/run_dryrun_from_json.py; staging/dryrun/sample_v1_1_15_buy_intent.json",
+      "details": [
+        "production/orders_enabled=true input was overridden by project status",
+        "preflight/parity ALLOWED input was rejected while project gate is BLOCKED",
+        "broker_call_made=false",
+        "no QMT or Redis order RPC"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "dual_environment_readonly_restart_reconciliation",
+      "status": "PASSED",
+      "evidence": "scripts/run_recovery_reconcile.py; runtime_data/state/simulation/qmt_runtime.sqlite3; runtime_data/state/production/qmt_runtime.sqlite3; runtime_data/audit/*/2026-09-09/readonly_snapshot.jsonl",
+      "details": [
+        "simulation previous/current snapshots reconciled",
+        "formal previous/current snapshots reconciled",
+        "both position_changes empty",
+        "both orders/trades zero",
+        "broker facts remain authoritative",
+        "no order/cancel RPC"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p07_simulation_external_baseline_and_v1_1_15_sleeve",
+      "status": "PASSED",
+      "evidence": "runtime_data/state/simulation/qmt_runtime.sqlite3; docs/19_p07_simulation_external_baseline_2026-09-09.md",
+      "details": [
+        "5 broker positions recorded as external baseline",
+        "no existing position auto-claimed",
+        "v1.1.15 sleeve registered at 100000",
+        "strategy cash 100000",
+        "strategy NAV 100000",
+        "broker=external baseline+sleeve reconciliation passed",
+        "no fills or orders"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p07_dual_environment_repeated_reconciliation",
+      "status": "PASSED",
+      "evidence": "scripts/run_recovery_reconcile.py; runtime_data/state/simulation/qmt_runtime.sqlite3; runtime_data/state/production/qmt_runtime.sqlite3",
+      "details": [
+        "simulation current run 6144ca627bbb432297eb3283df9b2641",
+        "formal current run eb2026868f234532a8bea3606f9ce780",
+        "both position_changes empty",
+        "both orders/trades zero",
+        "orders_enabled remains false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p08_v1_1_15_signal_to_sleeve_readonly_replay",
+      "status": "ATTENTION",
+      "evidence": "docs/20_p08_v1_1_15_signal_to_sleeve_dryrun_2026-09-09.md; runtime_data/evidence/simulation/qmt_v1_1_15_signal_probe_20260909_111308.json",
+      "details": [
+        "25/26 QMT securities returned data",
+        "18 signal dates",
+        "2 virtual state fills only",
+        "one 563230.SH read-only timeout",
+        "candidate intent rejected by project preflight gate",
+        "broker_call_made=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p09_multi_strategy_sleeve_registry_and_external_baseline",
+      "status": "PASSED",
+      "evidence": "docs/21_p09_multi_strategy_sleeve_registry_2026-09-09.md; runtime_data/state/simulation/qmt_runtime.sqlite3",
+      "details": [
+        "strategy A sleeve 100000 registered",
+        "strategy B sleeve 1000000 registered",
+        "duplicate registration does not reset capital",
+        "five broker positions remain external baseline",
+        "broker=external baseline+sleeves reconciliation passed",
+        "both NAVs equal initial capital",
+        "two initial NAV points persisted with idempotency",
+        "no fills or orders"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p10_dashboard_readonly_sleeve_data_contract",
+      "status": "PASSED",
+      "evidence": "docs/22_p10_dashboard_data_contract_2026-09-09.md; src/kitling_bigqmt/dashboard_status.py; tests/test_dashboard_status.py",
+      "details": [
+        "/api/status projection includes account snapshot",
+        "strategy_sleeves includes summary and NAV series",
+        "missing valuation prices fail closed",
+        "read_only=true",
+        "order_actions_exposed=false",
+        "34 tests passed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p10_loopback_dashboard_runtime_verification",
+      "status": "PASSED",
+      "evidence": "http://127.0.0.1:17890/healthz; http://127.0.0.1:17890/api/status; scripts/run_local_dashboard.py",
+      "details": [
+        "healthz returned read_only=true",
+        "api status returned two strategy sleeves",
+        "white theme rendered",
+        "Chinese status mapping rendered",
+        "desktop 1440px no overflow",
+        "mobile 390px no overflow",
+        "browser console errors zero",
+        "orders_enabled=false",
+        "order_actions_exposed=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p11_readonly_snapshot_parquet_duckdb_export",
+      "status": "PASSED",
+      "evidence": "docs/23_p11_readonly_snapshot_lake_export_2026-09-09.md; scripts/export_readonly_snapshot_to_lake.py; config/data_lake.yaml",
+      "details": [
+        "SQLite WAL snapshot exported without QMT/Redis calls",
+        "account assets 1",
+        "broker positions 5",
+        "orders 0",
+        "trades 0",
+        "quotes 5",
+        "strategy NAV 2",
+        "DuckDB Parquet read passed",
+        "empty datasets retain schema",
+        "orders_enabled=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p06_qmt_independent_risk_boundary_user_approval",
+      "status": "PASSED",
+      "evidence": "docs/24_p06_qmt_independent_risk_boundary_approval_2026-09-09.md; progress/current_status.json",
+      "details": [
+        "simulation scope bound to account 90000001",
+        "formal account 90000002 remains read-only",
+        "PTrade parity no longer required for simulation admission",
+        "preflight remains BLOCKED after hours",
+        "orders_enabled=false",
+        "no QMT order/cancel RPC"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p10_dashboard_sidebar_navigation",
+      "status": "PASSED",
+      "evidence": "docs/26_dashboard_sidebar_navigation_2026-09-09.md; scripts/run_local_dashboard.py",
+      "details": [
+        "six navigation items clickable",
+        "selected state changes",
+        "keyboard Enter/Space supported",
+        "no QMT/Redis/order calls",
+        "browser console errors zero"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p12_simulation_readonly_preflight",
+      "status": "PASSED",
+      "evidence": "docs/27_p12_simulation_preflight_and_dryrun_2026-09-09.md; runtime_data/evidence/simulation/qmt_quote_health_p12_20260909.json",
+      "details": [
+        "simulation account 90000001 snapshot passed",
+        "5 positions",
+        "0 orders",
+        "0 trades",
+        "3 quote samples",
+        "5/5 symbols fresh",
+        "formal account unchanged and read-only"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p12_simulation_local_dryrun_budget_and_idempotency",
+      "status": "PASSED",
+      "evidence": "docs/27_p12_simulation_preflight_and_dryrun_2026-09-09.md; staging/dryrun/p12_simulation_validation_candidate.json; scripts/run_dryrun_from_json.py",
+      "details": [
+        "first candidate RECORDED as PLANNED",
+        "same request_id returned DUPLICATE",
+        "sleeve cash and 100-share lot checks passed",
+        "broker_call_made=false",
+        "orders_enabled=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "simulation_position_names_and_dashboard_display",
+      "status": "PASSED",
+      "evidence": "docs/28_simulation_positions_with_names_2026-09-09.md; config/security_names.json; src/kitling_bigqmt/dashboard_status.py",
+      "details": [
+        "five simulation positions mapped to display names",
+        "code remains authoritative key",
+        "Dashboard shows name plus code",
+        "QMT raw name encoding does not affect valuation",
+        "browser console errors zero"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_cache_clean_validation_full_pool",
+      "status": "PASSED",
+      "evidence": "docs/76_bigqmt_cache_clean_validation_2026-09-12.md; runtime_data/evidence/simulation/qmt_history_cache/clean_validate_candidate_20260912_141600.json",
+      "details": [
+        "31 symbols",
+        "1d/5m/1m",
+        "35960 normalized rows",
+        "0 hard issues",
+        "247 bounded intraday rounding warnings",
+        "candidate-only; no lake write"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_full_candidate_release_and_import_readiness",
+      "status": "PASSED",
+      "evidence": "docs/77_bigqmt_candidate_release_readiness_2026-09-12.md; docs/78_bigqmt_candidate_import_readiness_2026-09-12.md; runtime_data/candidates/bigqmt_candidate_20260912_145717/import_readiness.json",
+      "details": [
+        "22218 valid daily missing-only rows",
+        "35836 intraday rows",
+        "6260 pre-listing placeholders quarantined",
+        "0 candidate/lake conflicts after null-row filtering",
+        "raw_bronze_import_ready=true",
+        "silver_pit_import_ready=false",
+        "no lake write"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_raw_bronze_import_plan_readonly",
+      "status": "PASSED",
+      "evidence": "scripts/plan_raw_bronze_import.py; runtime_data/candidates/bigqmt_candidate_20260912_145717/raw_bronze_import_plan.json",
+      "details": [
+        "canonical field/unit mapping recorded",
+        "daily and intraday isolated target layouts defined",
+        "legacy bars_raw direct append blocked",
+        "publish approval remains pending",
+        "lake_write=false",
+        "global_latest_updated=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_raw_overlay_local_publish_rehearsal",
+      "status": "PASSED",
+      "evidence": "scripts/build_bigqmt_raw_overlay_dryrun.py; runtime_data/publish_dryrun/bigqmt_candidate_20260912_145717/dryrun_publish_manifest.json",
+      "details": [
+        "daily 22218 rows round-tripped",
+        "intraday 35836 rows round-tripped",
+        "year/period and year/month/period partitions created",
+        "canonical fields preserved",
+        "shared lake untouched",
+        "LATEST untouched"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "lake_price_conflict_repair_queue_integrity",
+      "status": "PASSED",
+      "evidence": "scripts/build_lake_price_repair_queue.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/lake_price_repair_queue_20260912.json; docs/80_lake_price_schema_conflict_classification_2026-09-12.md",
+      "details": [
+        "17772 lake rows classified",
+        "231 front reclassification candidates",
+        "233 unmatched rows quarantined",
+        "9889 provenance-ambiguous rows retained",
+        "no automatic overwrite",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_complete_lake_import_gate",
+      "status": "PASSED",
+      "evidence": "scripts/assess_bigqmt_lake_import_gate.py; runtime_data/candidates/bigqmt_candidate_20260912_145717/final_import_gate.json",
+      "details": [
+        "candidate and raw readiness passed",
+        "daily/intraday roundtrip passed",
+        "repair queue integrity passed",
+        "decision GO_FOR_EXPLICIT_RAW_PUBLISH_REVIEW",
+        "legacy direct append blocked",
+        "PIT and explicit approval remain pending",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_pit_source_coverage_audit",
+      "status": "PASSED",
+      "evidence": "scripts/audit_bigqmt_pit_source_coverage.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/pit_source_coverage_20260912.json; docs/84_bigqmt_pit_source_coverage_audit_2026-09-12.md",
+      "details": [
+        "QMT factor probe readable for 31/31 codes",
+        "4 stock event chains matched",
+        "2 stock chains partial",
+        "6 ETF/LOF codes and 7 event dates matched via AkShare",
+        "19 ETF/LOF action sources still missing",
+        "PIT publish correctly remains blocked",
+        "no factor inference",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_etf_action_endpoint_probe",
+      "status": "PASSED",
+      "evidence": "scripts/probe_tushare_etf_action_source.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/tushare_etf_action_probe_20260912.json; docs/85_tushare_etf_action_probe_2026-09-12.md",
+      "details": [
+        "25/25 fund_div calls readable",
+        "0 API errors",
+        "0 ETF action rows returned",
+        "Tushare not used to fill PIT",
+        "no credentials persisted",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "akshare_etf_action_endpoint_probe",
+      "status": "PASSED",
+      "evidence": "scripts/probe_akshare_etf_action_source.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/akshare_etf_action_probe_20260912.json; docs/86_akshare_etf_action_probe_2026-09-12.md",
+      "details": [
+        "25/25 endpoint calls readable",
+        "0 API errors",
+        "6 codes with 7 action events",
+        "7/7 QMT event dates matched",
+        "factor amounts and available_at remain unverified",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "akshare_etf_announcement_probe_empty_response_fix",
+      "status": "PASSED",
+      "evidence": "scripts/probe_akshare_etf_announcements.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/akshare_etf_announcement_probe_20260912.json; docs/87_akshare_etf_announcement_probe_2026-09-12.md",
+      "details": [
+        "25/25 requests completed",
+        "0 real API errors",
+        "11 codes with 24 announcements",
+        "14 valid empty responses handled",
+        "announcement date/ID retained",
+        "no lake write"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_pit_event_reconciliation",
+      "status": "PASSED",
+      "evidence": "scripts/build_pit_event_reconciliation.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/pit_event_reconciliation_20260912.json; docs/88_bigqmt_pit_event_reconciliation_2026-09-12.md",
+      "details": [
+        "52 QMT factor events audited",
+        "52/52 event-date matches after Tushare stock cross-check",
+        "52 announcement-date candidates",
+        "exact available_at blocked",
+        "numeric factor reconciliation blocked",
+        "no Silver publish"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_stock_unmatched_action_probe",
+      "status": "PASSED",
+      "evidence": "scripts/probe_tushare_stock_actions_unmatched.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/tushare_stock_unmatched_probe_20260912.json",
+      "details": [
+        "600519.SH and 300750.SZ endpoints readable",
+        "134 action rows retained as evidence",
+        "four previously unmatched QMT event dates confirmed",
+        "credentials not persisted",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_pit_event_candidate_package",
+      "status": "PASSED",
+      "evidence": "scripts/build_bigqmt_pit_event_candidate.py; runtime_data/candidates/bigqmt_pit_event_candidate_20260912_160713/manifest.json",
+      "details": [
+        "52 row-level candidates built locally",
+        "event-date matches 52/52",
+        "available_at explicitly DATE_ONLY",
+        "numeric factor explicitly UNVERIFIED",
+        "no Silver publish",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_pit_numeric_field_reconciliation",
+      "status": "PASSED_WITH_GATE_BLOCK",
+      "evidence": "scripts/reconcile_bigqmt_pit_numeric_fields.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/pit_numeric_field_reconciliation_20260912.json; docs/89_bigqmt_pit_numeric_field_reconciliation_2026-09-12.md",
+      "details": [
+        "52 QMT events compared",
+        "4 exact numeric matches",
+        "17 Tushare exact matches with source conflict retained",
+        "24 external-10x unit differences isolated",
+        "7 ETF/no independent numeric row",
+        "no automatic unit conversion",
+        "Silver/PIT remains blocked",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_pit_unit_contract_draft_integrity",
+      "status": "PASSED_WITH_GATE_BLOCK",
+      "evidence": "config/bigqmt_pit_unit_contract_draft.json; docs/90_bigqmt_pit_unit_contract_draft_2026-09-12.md",
+      "details": [
+        "QMT payload indices and units recorded",
+        "daily/intraday volume=lots and amount=yuan recorded",
+        "source-specific unit ambiguity retained",
+        "no implicit conversion",
+        "Silver/PIT remains blocked",
+        "lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_etf_split_field_reconciliation",
+      "status": "PASSED_WITH_GATE_BLOCK",
+      "evidence": "scripts/probe_akshare_etf_split_source.py; scripts/reconcile_bigqmt_etf_split_fields.py; runtime_data/evidence/simulation/bigqmt_missing_key_scans/etf_split_field_reconciliation_20260912.json; docs/91_bigqmt_etf_split_field_reconciliation_2026-09-12.md",
+      "details": [
+        "7/7 ETF/LOF QMT events linked to preceding split records",
+        "7/7 bonus-share ratios matched",
+        "cumulative factor only diagnostic",
+        "exact available_at remains blocked",
+        "no lake write"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_isolated_raw_publish_post_publish_verification",
+      "status": "PASSED",
+      "evidence": "scripts/verify_bigqmt_raw_publish.py; docs/93_bigqmt_isolated_raw_publish_verified_2026-09-12.md; runtime_data/evidence/simulation/raw_publish/bigqmt_candidate_20260912_145717_verification.json",
+      "details": [
+        "daily 22218/22218 rows round-tripped",
+        "intraday 35836/35836 rows round-tripped",
+        "business keys and row hashes exact",
+        "tree hash matched publish manifest",
+        "staging absent",
+        "legacy bronze/bars_raw and catalog/LATEST unchanged",
+        "Silver/PIT remains blocked"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_lake_import_gate_after_publish",
+      "status": "PASSED",
+      "evidence": "scripts/assess_bigqmt_lake_import_gate.py; runtime_data/candidates/bigqmt_candidate_20260912_145717/final_import_gate.json",
+      "details": [
+        "decision PUBLISHED_ISOLATED_RAW_VERIFIED",
+        "explicit approval and isolated publisher gates passed",
+        "published roundtrip/tree hash/staging cleanup passed",
+        "legacy direct append and canonical PIT remain blocked",
+        "LATEST unchanged",
+        "orders_enabled=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_pytest_after_bigqmt_raw_publish",
+      "status": "PASSED",
+      "evidence": "py -m pytest -q",
+      "details": [
+        "78 tests passed",
+        "no broker calls",
+        "no order/cancel capability enabled"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_raw_publish_idempotency_recheck",
+      "status": "PASSED",
+      "evidence": "py scripts/publish_bigqmt_raw_overlay.py --approve-raw-publish",
+      "details": [
+        "existing release returned DUPLICATE",
+        "no second copy or overwrite performed",
+        "tree hash unchanged",
+        "LATEST unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_pytest_after_same_day_close_guard_fix",
+      "status": "PASSED",
+      "evidence": "py -m pytest -q",
+      "details": [
+        "80 tests passed",
+        "same-day close now reaches real-fill holding-period guard",
+        "future-day/entry timing remains fail-closed",
+        "no broker calls"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "dashboard_bigqmt_raw_release_projection",
+      "status": "PASSED",
+      "evidence": "http://127.0.0.1:17890/api/status; scripts/run_local_dashboard.py",
+      "details": [
+        "raw status PUBLISHED_ISOLATED_RAW_VERIFIED",
+        "daily 22218 and intraday 35836 shown",
+        "read_only=true",
+        "orders_enabled=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "bigqmt_etf_u25_research_pit_release_and_asof_probe",
+      "status": "PASSED",
+      "evidence": "docs/95_bigqmt_etf_research_pit_release_2026-09-12.md; C:/BigQMT/research/quant_data_lake/silver/_bigqmt_research_pit_releases/bigqmt_etf_research_pit_20260912_175315/publish_manifest.json; runtime_data/evidence/simulation/research_pit_probes/etf_research_pit_probe_20260912_180122.json",
+      "details": [
+        "25 U25 ETFs and 34468 daily rows published as isolated research PIT",
+        "7 ETF split ratios independently reconciled",
+        "as-of filter returned 25/25 trailing-return and maximum-drawdown inputs",
+        "global LATEST and legacy silver/bars_pit unchanged",
+        "no broker call or order capability"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_pytest_after_etf_research_pit_loader",
+      "status": "PASSED",
+      "evidence": "py -m pytest -q",
+      "details": [
+        "90 tests passed",
+        "explicit isolated-release loader rejects global-LATEST ambiguity",
+        "timezone-aware available_at filter and trailing-return/drawdown inputs covered",
+        "no broker call or order capability enabled"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "dashboard_isolated_etf_research_pit_projection_runtime",
+      "status": "PASSED",
+      "evidence": "http://127.0.0.1:17890/api/status; scripts/run_local_dashboard.py",
+      "details": [
+        "Dashboard 17890 restarted from the current source and returned PUBLISHED_ISOLATED_RESEARCH_PIT",
+        "release has 34468 rows and 25 codes",
+        "global_latest_updated=false",
+        "both 17890 simulation and 17891 production-readonly health endpoints passed",
+        "orders_enabled=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_pytest_after_miniqmt_runtime_and_ingest_adapters",
+      "status": "PASSED",
+      "evidence": "py -m pytest -q",
+      "details": [
+        "111 tests passed in 11.50s",
+        "MiniQMT runtime probe and exporter normalization tests included",
+        "no broker call, QMT order/cancel, Redis order capability or lake LATEST update"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "miniqmt_embedded_export_and_unit_probe",
+      "status": "PASSED_WITH_SCOPE_LIMIT",
+      "evidence": "docs/104_miniqmt_embedded_export_probe_2026-09-12.md; runtime_data/evidence/simulation/miniqmt_exports/probe_after_refresh_1d_20260912.csv; runtime_data/evidence/simulation/miniqmt_exports/refresh_probe_20260912.json",
+      "details": [
+        "embedded Python 3.6.8 refreshed and exported 510300.SH/600519.SH at 1d/1m/5m",
+        "510300.SH/600519.SH/000001.SZ unit ratio check supports volume=lots",
+        "amount measured as yuan",
+        "unit conclusion limited to sampled symbols/build"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "miniqmt_intraday_daily_volume_amount_reconciliation",
+      "status": "PASSED",
+      "evidence": "scripts/check_miniqmt_intraday_reconcile.py; runtime_data/evidence/simulation/miniqmt_exports/intraday_reconcile_20260912.json",
+      "details": [
+        "1m and 5m volume sums exactly match daily for both symbols",
+        "amount rounding deltas within 145 CNY",
+        "no lake write or broker call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "miniqmt_volume_unit_measurement_sample",
+      "status": "PASSED_WITH_SCOPE_LIMIT",
+      "evidence": "scripts/measure_miniqmt_units.py; runtime_data/evidence/simulation/miniqmt_exports/unit_measurement_20260912.json",
+      "details": [
+        "000001.SZ/510300.SH/600519.SH amount-close-volume ratios 99.54-99.94",
+        "sampled MiniQMT volume classified as lots",
+        "classification limited to this embedded build and sample"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "miniqmt_u25_bronze_candidate_publish",
+      "status": "PASSED_WITH_GATE_BLOCK",
+      "evidence": "scripts/publish_miniqmt_bronze_candidate.py; docs/105_miniqmt_bronze_candidate_2026-09-12.md; C:/BigQMT/research/quant_data_lake/v2/bronze/bars/_releases/unified_v2_bronze_miniqmt_20260912T230500Z/manifest.json",
+      "details": [
+        "64538 rows and 27 codes across 1d/1m/5m",
+        "business-key/OHLC/nonnegative/hash gates passed",
+        "isolated release only; global LATEST and Silver/PIT unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "miniqmt_bigqmt_source_reconciliation",
+      "status": "PASSED_WITH_ETF_SOURCE_COVERAGE_BLOCK",
+      "evidence": "scripts/reconcile_miniqmt_sources_v2.py; docs/106_miniqmt_source_reconciliation_2026-09-12.md; runtime_data/evidence/simulation/miniqmt_exports/source_reconciliation_20260912.json",
+      "details": [
+        "193 overlapping MiniQMT/BigQMT daily keys passed tolerances",
+        "18 overlapping MiniQMT/Tushare stock keys passed tolerances",
+        "Tushare daily returned no ETF rows, so ETF three-source coverage remains blocked",
+        "no lake pointer or global LATEST update"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "unified_v2_update_cycle_after_miniqmt_candidate",
+      "status": "PASSED_WITH_PIT_BLOCK",
+      "evidence": "scripts/run_unified_v2_update_cycle.py; runtime_data/evidence/simulation/unified_lake_v2/unified_v2_cycle_20260912T150830Z.json",
+      "details": [
+        "all five bounded candidate/preflight stages returned 0",
+        "decision PUBLISHED_CANDIDATES_ONLY_BLOCKED_PIT",
+        "global LATEST preserved; no broker or order calls"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_overlap_candidate_fetch",
+      "status": "PASSED_WITH_ETF_COVERAGE_LIMIT",
+      "evidence": "scripts/fetch_tushare_overlap_candidate.py; runtime_data/evidence/simulation/miniqmt_exports/tushare_overlap_20260912.parquet.manifest.json",
+      "details": [
+        "Tushare fetched 18 rows for 000001.SZ and 600519.SH through 20260911",
+        "ETF daily endpoint returned no rows for requested ETF codes",
+        "token not persisted; lake_write=false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_fund_daily_u25_fetch",
+      "status": "PASSED",
+      "evidence": "scripts/fetch_tushare_fund_daily_candidate.py; runtime_data/evidence/simulation/miniqmt_exports/tushare_fund_daily_u25_20260912.parquet.manifest.json",
+      "details": [
+        "25/25 ETF codes returned 225 rows through 20260911",
+        "volume lots and amount thousand-CNY retained explicitly",
+        "credentials not persisted; no lake pointer update"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "three_source_bronze_candidate_publish",
+      "status": "PASSED_WITH_PIT_BLOCK",
+      "evidence": "scripts/publish_three_source_bronze_candidate.py; docs/107_three_source_bronze_candidate_2026-09-12.md; C:/BigQMT/research/quant_data_lake/v2/bronze/bars/_releases/unified_v2_bronze_three_source_20260912T233000Z/manifest.json",
+      "details": [
+        "MiniQMT/BigQMT/Tushare source-preserving candidate published",
+        "68397 rows with all per-source quality gates passed",
+        "Silver/PIT and global LATEST intentionally unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p16_profile_scoped_qmt_launcher_and_live_bridge_probe",
+      "status": "PASSED_WITH_TERMINAL_BLOCK",
+      "evidence": "docs/107_tray_qmt_autostart_and_strategy_controls_2026-09-12.md; docs/108_p16_live_bridge_probe_and_terminal_evidence_2026-09-12.md; scripts/check_bridge_ping.py",
+      "details": [
+        "profile-scoped QMT launcher reports PROCESS_ONLY rather than login readiness",
+        "Tray live Bridge probe runs only allow-listed ping at one-minute cadence",
+        "simulation and production both correctly returned DEGRADED timeout after controlled test",
+        "113 pytest tests passed",
+        "no account/order/cancel RPC and all order locks remain false"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "silver_bar_time_key_and_quantity_tolerance_fix",
+      "status": "PASSED_WITH_GLOBAL_PIT_BLOCK",
+      "evidence": "src/kitling_bigqmt/silver_canonical_v2.py; docs/108_silver_bar_time_key_fix_2026-09-12.md; C:/BigQMT/research/quant_data_lake/v2/silver/raw_canonical/_releases/unified_v2_silver_raw_three_source_20260913T010000Z/manifest.json",
+      "details": [
+        "114 tests passed after key/tolerance changes",
+        "Silver candidate has 0 conflicts and 234 verified multi-source rows",
+        "intraday bar_time preserved; provisional rows retained; global LATEST unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "latest_three_source_freshness_and_reconciliation",
+      "status": "PASSED_WITH_GLOBAL_PIT_BLOCK",
+      "evidence": "scripts/check_unified_v2_freshness.py; runtime_data/evidence/simulation/unified_lake_v2/source_freshness_three_source_20260913.json; scripts/reconcile_miniqmt_sources_v2.py; runtime_data/evidence/simulation/miniqmt_exports/three_source_reconciliation_latest_20260913.json",
+      "details": [
+        "latest isolated BigQMT and Tushare candidates both end at 20260911",
+        "MiniQMT overlap: 184/184 BigQMT and 225/225 Tushare rows pass price/volume/amount tolerances",
+        "canonical Bronze input schema is supported without changing source units",
+        "no lake pointer, global LATEST, broker or order call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_pytest_after_latest_source_gate_adapters",
+      "status": "PASSED_WITH_GLOBAL_PIT_BLOCK",
+      "evidence": "py -m pytest -q",
+      "details": [
+        "145 tests passed, 1 skipped in 79.05s",
+        "freshness/reconciliation adapter changes covered",
+        "global PIT and LATEST remain fail-closed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "latest_pit_gate_with_freshness_pass",
+      "status": "BLOCKED_PIT_V2",
+      "evidence": "scripts/check_pit_v2_gate.py; runtime_data/evidence/simulation/unified_lake_v2/pit_v2_gate_latest_20260913.json",
+      "details": [
+        "source_freshness gate now PASSED using the latest three-source candidates",
+        "raw canonical, corporate-action numeric factor, available_at and historical universe gates remain explicitly blocked",
+        "publishable=false; global LATEST unchanged; no broker or order call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_universe_snapshot_candidate",
+      "status": "PASSED_WITH_HISTORICAL_PIT_BLOCK",
+      "evidence": "scripts/fetch_tushare_universe_candidate_v2.py; docs/110_tushare_universe_candidate_2026-09-13.md; runtime_data/staging/universe/tushare_universe_candidate_20260913.parquet",
+      "details": [
+        "8,687 listing interval rows: 5,901 stocks and 2,786 exchange funds",
+        "106 funds missing list_date quarantined",
+        "primary key/hash/timezone validation passed",
+        "current snapshot availability is explicitly non-historical; no Silver/PIT/LATEST write"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "latest_three_source_silver_rebuild",
+      "status": "PASSED_WITH_GLOBAL_PIT_BLOCK",
+      "evidence": "scripts/build_silver_raw_canonical_candidate.py; C:/BigQMT/research/quant_data_lake/v2/silver/raw_canonical/_releases/unified_v2_silver_raw_three_source_20260913T123000Z/manifest.json",
+      "details": [
+        "rebuilt isolated Silver Raw from the latest three-source Bronze release",
+        "67988 rows / 55 codes; 234 verified multi-source and 67754 provisional; no conflicts",
+        "raw canonical structure gate passed but PIT adjustment remains blocked",
+        "global LATEST unchanged"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "tushare_u25_fund_action_probe",
+      "status": "BLOCKED_NO_ACTION_ROWS",
+      "evidence": "scripts/fetch_tushare_fund_actions_candidate_v2.py; docs/111_tushare_fund_action_probe_2026-09-13.md; runtime_data/staging/actions/tushare_fund_div_u25_20260913.manifest.json",
+      "details": [
+        "25 U25 ETF/LOF fund_div requests returned 0 rows",
+        "empty response is not interpreted as no dividends",
+        "fund_adj cumulative factors were not promoted; ETF action and available_at gates remain blocked"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p16_dual_qmt_miniqmt_tray_launchers",
+      "status": "PASSED_WITH_LIVE_TERMINAL_EVIDENCE_PENDING",
+      "evidence": "docs/114_tray_dual_qmt_miniqmt_autostart_2026-09-13.md; runtime_data/evidence/tray/manifest_miniqmt_autostart_20260913.json",
+      "details": [
+        "per-profile MiniQMT linkMini CLI status tested without launching a terminal",
+        "native simulation and production tray EXEs rebuilt with separate QMT and MiniQMT start/status entries",
+        "4 focused pytest checks passed",
+        "live GUI startup/account readiness must still be observed; all order locks remain closed"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "p24_coordinator_lease_guard_and_readonly_projection",
+      "status": "PASSED",
+      "evidence": "tests/test_execution_lease_guard.py; tests/test_coordinator_lease_projection.py; tests/test_coordinator_bootstrap.py",
+      "details": [
+        "20 focused tests passed",
+        "unauthenticated, expired, stale, wrong-host and production leases fail closed",
+        "Coordinator SQLite epoch=1 is read-only projected",
+        "no grant/switch HTTP endpoint exists"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_project_tests_after_p24_tray_coordinator_updates",
+      "status": "PASSED",
+      "evidence": "py -3.12 -m pytest -p no:qt -q tests",
+      "details": [
+        "145 tests passed in 11.63 seconds",
+        "test collection limited to project tests so PyInstaller third-party fixtures are excluded",
+        "no broker, order or cancel call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "machine_local_single_point_override_gate",
+      "status": "PASSED",
+      "evidence": "docs/134_m01_machine_local_single_point_override_acceptance_2026-09-15.md; scripts/verify_machine_local_config.py; tests/test_machine_config.py; tests/test_machine_config_audit.py; tests/test_machine_config_fail_closed.py",
+      "details": [
+        "21 machine-config/audit/fail-closed tests passed (7 fail-closed option B)",
+        "present-but-malformed machine.local.json raises MachineLocalConfigError across load_machine_local/load_gateway/load_tray_profiles/effective_config; missing file still falls back to {}",
+        "verify_machine_local_config.py catches the loader error without traceback and exits 1",
+        "17 coordinator regression tests passed",
+        "machine_local_valid=true, both effective-config hashes deterministic",
+        "simulation orders_enabled=false, production_readonly orders_enabled=false",
+        "hardcoded audit finding_count=94 across config/scripts/src",
+        "readonly; no Redis/QMT/OpenClaw/order call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "full_project_tests_20260915",
+      "status": "PASSED",
+      "evidence": "py -3.12 -m pytest -p no:qt -q tests",
+      "details": [
+        "175 passed in 16.94s",
+        "includes v1_1_15 preflight date gate, three-source lake, machine config, tray, coordinator, dashboard tests",
+        "no broker/order/cancel call"
+      ],
+      "orders_enabled": false
+    },
+    {
+      "name": "entry_point_rollout_20260915",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/portable_deployment.py; scripts/* configuration entry points; docs/134_m01_machine_local_single_point_override_acceptance_2026-09-15.md",
+      "details": [
+        "portable_deployment now validates effective load_tray_profiles/load_gateway values",
+        "research, diagnostic, comparison, cache and v1_1_15 entry scripts use load_gateway by default",
+        "explicit --config paths remain supported for reproducible audits",
+        "py -3.12 -m compileall -q src scripts passed",
+        "26 focused M01/tray tests passed; full suite remains 175 passed",
+        "no broker/order/cancel call"
+      ],
+      "orders_enabled": false
+    }
+    ,{
+      "name": "execution_admission_gate_20260915",
+      "status": "PASSED",
+      "evidence": "src/kitling_bigqmt/execution_admission.py; tests/test_execution_admission.py",
+      "details": [
+        "16 admission tests passed; full suite 208 passed in 18.30s",
+        "production account 90000002 denied unconditionally",
+        "unarmed, expired, account-mismatched and strategy-mismatched local windows denied",
+        "unreachable Coordinator and non-designated host denied",
+        "lease envelope audited but still cannot open execution in the current milestone",
+        "run_v1_1_15_simulation_cycle, submit_v1_1_15_simulation_entry and run_one_time_510300_simulation_test all require the gate",
+        "no broker/order/cancel call"
+      ],
+      "orders_enabled": false
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://contracts/order_intent.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "request_id", "account_id", "strategy_id", "symbol", "side", "quantity", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1}, "request_id": {"type": "string", "format": "uuid"},
+    "account_id": {"type": "string"}, "strategy_id": {"type": "string"}, "symbol": {"type": "string"},
+    "side": {"enum": ["BUY", "SELL"]}, "quantity": {"type": "integer", "exclusiveMinimum": 0},
+    "created_at": {"type": "string", "format": "date-time"}
+  }
+}

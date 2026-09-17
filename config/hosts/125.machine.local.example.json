@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comment": "192.0.2.125 future primary runtime host. Template only; defaults remain read-only until Coordinator approval.",
+  "data_directory": "E:/kitling_QMT_work/kitling_bigqmt/runtime_data",
+  "coordinator": { "endpoint": "http://192.0.2.121:18443", "host_id": "192.0.2.125" },
+  "environments": {
+    "simulation": { "qmt_root": "E:/国金QMT交易端模拟", "redis": { "host": "127.0.0.1", "port": 6379, "db": 5 }, "dashboard_port": 17890, "ready_port": 58600 },
+    "production_readonly": { "qmt_root": "E:/国金证券QMT交易端", "redis": { "host": "127.0.0.1", "port": 6380, "db": 5 }, "dashboard_port": 17891, "ready_port": 58600 }
+  }
+}

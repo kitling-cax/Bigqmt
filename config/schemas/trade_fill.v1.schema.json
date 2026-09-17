@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/trade_fill.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fill_id", "account_id", "host_id", "strategy_id", "symbol", "side", "quantity", "price", "trade_time", "received_time"],
+  "properties": {
+    "schema_version": {"const": 1}, "fill_id": {"type": "string", "minLength": 1},
+    "account_id": {"type": "string"}, "host_id": {"type": "string"}, "strategy_id": {"type": "string"},
+    "symbol": {"type": "string"}, "side": {"enum": ["BUY", "SELL"]},
+    "quantity": {"type": "integer", "exclusiveMinimum": 0}, "price": {"type": "number", "exclusiveMinimum": 0},
+    "trade_time": {"type": "string", "format": "date-time"}, "received_time": {"type": "string", "format": "date-time"}
+  }
+}

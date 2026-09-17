@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://contracts/account_snapshot.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "host_id", "account_id", "environment", "captured_at", "positions", "orders", "trades"],
+  "properties": {
+    "schema_version": {"const": 1}, "host_id": {"type": "string"}, "account_id": {"type": "string"},
+    "environment": {"enum": ["SIMULATION", "PRODUCTION_READ_ONLY"]},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "positions": {"type": "array"}, "orders": {"type": "array"}, "trades": {"type": "array"}
+  }
+}

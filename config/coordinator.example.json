@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "bind_host": "192.0.2.121",
+  "port": 18443,
+  "tls": {"mode": "private_ca", "certificate_san": ["192.0.2.121"]},
+  "database_path": "/var/lib/kitling-bigqmt-coordinator/coordinator.sqlite3",
+  "allowed_host_ids": ["192.0.2.105"],
+  "accounts": {
+    "90000001": {"mode": "SIMULATION", "allow_execution": true},
+    "90000002": {"mode": "PRODUCTION_READ_ONLY", "allow_execution": false}
+  }
+}

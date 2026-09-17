@@ -1,0 +1,7 @@
+# Desktop Python dependencies for the optional BigQMT Tray QMT launcher.
+# They are not needed by the QMT embedded Bridge itself.
+psutil>=5.9
+pywin32>=306
+pyautogui>=0.9.54
+# Packaging-only dependency: creates the one-file BigQMT tray EXE.
+pyinstaller>=6.22,<7

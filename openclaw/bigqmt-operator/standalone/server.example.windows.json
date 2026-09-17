@@ -1,0 +1,8 @@
+{
+  "name": "bigqmt-readonly",
+  "transport": "stdio",
+  "command": "py",
+  "args": ["-3.11", "<LOCAL_OPENCLAW_BIGQMT_DIR>\\bigqmt_readonly_mcp.py"],
+  "scope": "observer",
+  "orders_enabled": false
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "pool_id": "V1.1.17_U25_NO_ALCOHOL_ETF_POOL",
+  "display_name": "v1.1.17 U25 无酒 ETF 池（等权基准）",
+  "source_file": "C:/BigQMT/research/PTtrade策略编辑器/ptrade策略项目/S10-D1_低频动量轮动_RC1-RC2/策略源码/当前候选/5日/s10_d1_u25_no_alcohol_etf_5d_sim_owned_position_v1.1.17.py",
+  "qmt_codes": [
+    "518880.SH", "501225.SH", "513030.SH", "563230.SH", "512980.SH",
+    "513090.SH", "512200.SH", "162415.SZ", "159915.SZ", "159985.SZ",
+    "161226.SZ", "159941.SZ", "161127.SZ", "159852.SZ", "162719.SZ",
+    "159582.SZ", "162411.SZ", "159995.SZ", "160723.SZ", "159667.SZ",
+    "159530.SZ", "159611.SZ", "159992.SZ", "515880.SH", "159755.SZ"
+  ],
+  "fallback_qmt_code": "511880.SH",
+  "benchmark_code": "V1.1.17_ETF_POOL",
+  "method": "equal_weight_daily_return_chain",
+  "notes": "512690 酒 ETF 已剔除；511880 仅为策略交易 fallback，不纳入等权基准。"
+}

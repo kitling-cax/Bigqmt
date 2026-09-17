@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/host_fact_envelope.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "host_id", "key_id", "request_id", "issued_at_epoch", "expires_at_epoch", "body_sha256", "body", "signature"],
+  "properties": {
+    "schema_version": {"const": 1}, "host_id": {"type": "string", "minLength": 1},
+    "key_id": {"type": "string", "minLength": 8}, "request_id": {"type": "string", "format": "uuid"},
+    "issued_at_epoch": {"type": "number"}, "expires_at_epoch": {"type": "number"},
+    "body_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "body": {"type": "object"}, "signature": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  },
+  "description": "Host fact transport identity. It is separate from account execution authorization Keys."
+}
