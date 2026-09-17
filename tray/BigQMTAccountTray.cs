@@ -9,24 +9,26 @@ using System.Net.Sockets;
 using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using System.Web.Script.Serialization;
 
 internal static class BigQMTAccountTray
 {
 #if SIMULATION
     private const string Profile = "simulation";
-    private const string Account = "90000001";
+    private const string DefaultAccount = "90000001";
     private const int RedisPort = 6379;
     private const int DashboardPort = 17890;
     private const string DashboardRoute = "/simulation/overview";
     private const string ProfileTitle = "BigQMT 模拟盘";
 #else
     private const string Profile = "production_readonly";
-    private const string Account = "90000002";
+    private const string DefaultAccount = "90000002";
     private const int RedisPort = 6380;
     private const int DashboardPort = 17891;
     private const string DashboardRoute = "/production-readonly/overview";
     private const string ProfileTitle = "BigQMT 正式只读";
 #endif
+    private static string Account;
 
     private static NotifyIcon tray;
     private static ToolStripMenuItem statusItem;
@@ -94,6 +96,7 @@ internal static class BigQMTAccountTray
     [STAThread]
     private static void Main()
     {
+        Account = LoadConfiguredAccount();
         mutex = new MutexHandle("Local\\KitlingBigQMTNativeTray-" + Profile);
         if (!mutex.IsFirstInstance) return;
         Application.EnableVisualStyles();
@@ -168,6 +171,39 @@ internal static class BigQMTAccountTray
     private static string RootPath()
     {
         return Directory.GetParent(Application.StartupPath).FullName;
+    }
+
+    private static string LoadConfiguredAccount()
+    {
+        // The public source contains synthetic account IDs only.  A deployed
+        // host may override the profile account in the ignored local config;
+        // this keeps the native tray, Redis RPC namespace and Coordinator
+        // heartbeat on the same account without publishing broker identifiers.
+        try
+        {
+            string path = Path.Combine(RootPath(), "config", "machine.local.json");
+            if (!File.Exists(path)) return DefaultAccount;
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            object root = serializer.DeserializeObject(json);
+            var rootMap = root as System.Collections.Generic.Dictionary<string, object>;
+            object environments;
+            if (rootMap == null || !rootMap.TryGetValue("environments", out environments)) return DefaultAccount;
+            var envMap = environments as System.Collections.Generic.Dictionary<string, object>;
+            object profileNode;
+            if (envMap == null || !envMap.TryGetValue(Profile, out profileNode)) return DefaultAccount;
+            var profileMap = profileNode as System.Collections.Generic.Dictionary<string, object>;
+            object account;
+            if (profileMap == null || !profileMap.TryGetValue("account_id", out account)) return DefaultAccount;
+            string value = Convert.ToString(account);
+            return string.IsNullOrWhiteSpace(value) ? DefaultAccount : value.Trim();
+        }
+        catch
+        {
+            // A malformed local override must not stop the status tray.  The
+            // Python preflight remains responsible for rejecting bad config.
+            return DefaultAccount;
+        }
     }
 
     // The msys2 build of redis-server.exe understands POSIX-style mount paths

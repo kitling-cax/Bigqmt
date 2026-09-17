@@ -15,7 +15,7 @@ foreach ($item in @(
 )) {
   $output = Join-Path $ProjectRoot ('tray\' + $item.Name)
   $icon = Join-Path $ProjectRoot ('tray\' + $item.Icon)
-  & $csc /nologo /target:winexe /optimize+ /define:$($item.Define) /win32icon:$icon /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /out:$output $source
+    & $csc /nologo /target:winexe /optimize+ /define:$($item.Define) /win32icon:$icon /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /out:$output $source
   if ($LASTEXITCODE -ne 0) { throw "compile failed: $($item.Name)" }
 }
 
