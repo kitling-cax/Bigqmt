@@ -200,7 +200,7 @@ def _resolve_runtime_path(root: Path, value: Any) -> str:
 def apply_gateway_overrides(root: Path, profile: str, gateway: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the gateway config with machine-local overrides applied.
 
-    仅覆盖 Redis 端点与 state_db/audit_dir 的本地定位；不触碰账户、下单开关。
+    仅覆盖账户标识、Redis 端点与 state_db/audit_dir 的本地定位；不触碰下单开关。
     """
     out = dict(gateway)
     machine = load_machine_local(root)
@@ -213,6 +213,8 @@ def apply_gateway_overrides(root: Path, profile: str, gateway: dict[str, Any]) -
             if value not in (None, ""):
                 merged[key] = value
         out["redis"] = merged
+    if env.get("account_id"):
+        out["account_id"] = str(env["account_id"])
     for key in ("state_db", "audit_dir"):
         if out.get(key):
             out[key] = _resolve_runtime_path(root, out[key])
@@ -238,6 +240,8 @@ def load_tray_profiles(root: Path) -> dict[str, Any]:
         if not isinstance(entry, dict):
             continue
         env = machine_environment(machine, profile)
+        if env.get("account_id"):
+            entry["account_id"] = str(env["account_id"])
         if env.get("qmt_root"):
             entry["qmt_root"] = str(resolve_preset_path(env["qmt_root"], root))
         redis_override = env.get("redis")

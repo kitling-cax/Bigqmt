@@ -33,6 +33,7 @@
       "properties": {
         "qmt_root": {"type": "string", "minLength": 1},
         "bin_x64": {"type": "string", "minLength": 1},
+        "account_id": {"type": "string", "minLength": 1},
         "redis": {
           "type": "object",
           "additionalProperties": true,
