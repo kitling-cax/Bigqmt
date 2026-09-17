@@ -10,8 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = (
-    ("bigqmt_tray_simulation.py", "BigQMT_模拟盘_90000001", "BigQMT_Simulation_90000001.ico"),
-    ("bigqmt_tray_production_readonly.py", "BigQMT_正式只读_90000002", "BigQMT_Production_ReadOnly_90000002.ico"),
+    ("bigqmt_tray_simulation.py", "BigQMT_模拟盘", "BigQMT_Simulation.ico"),
+    ("bigqmt_tray_production_readonly.py", "BigQMT_正式只读", "BigQMT_Production_ReadOnly.ico"),
 )
 
 

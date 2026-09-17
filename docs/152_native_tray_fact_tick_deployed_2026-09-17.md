@@ -6,8 +6,8 @@
 
 两个旧托盘进程已退出后，重新编译并覆盖正式 EXE，随后分别启动：
 
-- `tray/BigQMT_Simulation_90000001.exe`
-- `tray/BigQMT_Production_ReadOnly_90000002.exe`
+- `tray/BigQMT_Simulation.exe`
+- `tray/BigQMT_Production_ReadOnly.exe`
 
 本次版本把 facts-only 采集/投递加入现有低频维护调度，每 5 分钟最多执行一次；它与 v1.1.15 策略调度分离，不授予订单、Lease 或确认能力。
 

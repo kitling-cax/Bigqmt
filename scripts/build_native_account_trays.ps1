@@ -10,8 +10,8 @@ $source = Join-Path $ProjectRoot 'tray\BigQMTAccountTray.cs'
 & py -3.12 (Join-Path $ProjectRoot 'scripts\generate_native_tray_icons.py')
 if ($LASTEXITCODE -ne 0) { throw 'native tray icon generation failed' }
 foreach ($item in @(
-  @{ Define='SIMULATION'; Name='BigQMT_Simulation_90000001.exe'; Icon='BigQMT_Simulation_90000001.ico' },
-  @{ Define='PRODUCTION'; Name='BigQMT_Production_ReadOnly_90000002.exe'; Icon='BigQMT_Production_ReadOnly_90000002.ico' }
+  @{ Define='SIMULATION'; Name='BigQMT_Simulation.exe'; Icon='BigQMT_Simulation.ico' },
+  @{ Define='PRODUCTION'; Name='BigQMT_Production_ReadOnly.exe'; Icon='BigQMT_Production_ReadOnly.ico' }
 )) {
   $output = Join-Path $ProjectRoot ('tray\' + $item.Name)
   $icon = Join-Path $ProjectRoot ('tray\' + $item.Icon)
@@ -19,7 +19,7 @@ foreach ($item in @(
   if ($LASTEXITCODE -ne 0) { throw "compile failed: $($item.Name)" }
 }
 
-$manifest = foreach ($name in 'BigQMT_Simulation_90000001.exe', 'BigQMT_Production_ReadOnly_90000002.exe') {
+$manifest = foreach ($name in 'BigQMT_Simulation.exe', 'BigQMT_Production_ReadOnly.exe') {
   $path = Join-Path $ProjectRoot ('tray\' + $name)
   $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
   "$hash  $name"

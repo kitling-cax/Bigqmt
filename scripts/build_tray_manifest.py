@@ -13,10 +13,10 @@ TRAY_FILES = (
     "tray/BigQMTTray.ps1",
     "tray/launch_simulation_tray.cmd",
     "tray/launch_production_readonly_tray.cmd",
-    "tray/BigQMT_Simulation_90000001.exe",
-    "tray/BigQMT_Production_ReadOnly_90000002.exe",
-    "tray/BigQMT_Simulation_90000001.ico",
-    "tray/BigQMT_Production_ReadOnly_90000002.ico",
+    "tray/BigQMT_Simulation.exe",
+    "tray/BigQMT_Production_ReadOnly.exe",
+    "tray/BigQMT_Simulation.ico",
+    "tray/BigQMT_Production_ReadOnly.ico",
     "tray/BigQMT_native_tray_checksums.sha256",
     "config/tray_profiles.json",
     "scripts/bigqmt_runtime.py",
@@ -34,8 +34,8 @@ TRAY_FILES = (
     "src/kitling_bigqmt/local_backup.py",
 )
 GENERATED_TRAY_FILES = {
-    "tray/BigQMT_Simulation_90000001.exe",
-    "tray/BigQMT_Production_ReadOnly_90000002.exe",
+    "tray/BigQMT_Simulation.exe",
+    "tray/BigQMT_Production_ReadOnly.exe",
 }
 
 

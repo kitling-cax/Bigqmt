@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "TRAY=%~dp0BigQMT_Production_ReadOnly_90000002.exe"
+set "TRAY=%~dp0BigQMT_Production_ReadOnly.exe"
 if not exist "%TRAY%" (
   echo BigQMT production readonly tray EXE is missing: %TRAY%
   pause

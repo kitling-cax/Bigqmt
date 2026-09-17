@@ -1,6 +1,6 @@
 # 模拟 BigQMT Redis/RPC 配置
 
-部署位置：`F:\\kitling_QMT_work\\国金QMT交易端模拟\\python\\bigqmt_signal_trader_local_config.py`
+部署位置：`C:\\BigQMT\\work\\国金QMT交易端模拟\\python\\bigqmt_signal_trader_local_config.py`
 
 该配置只写入模拟版 QMT，连接项目本机 Redis `127.0.0.1:6379` 的第 5 库。
 

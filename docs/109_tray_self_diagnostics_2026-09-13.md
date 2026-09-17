@@ -15,8 +15,8 @@ py -3.12 scripts\diagnose_tray.py --profile production_readonly
 
 每个账户都有一个独立的原生托盘 EXE，分别位于：
 
-- `tray\BigQMT_Simulation_90000001.exe`（模拟盘 90000001）
-- `tray\BigQMT_Production_ReadOnly_90000002.exe`（正式只读 90000002）
+- `tray\BigQMT_Simulation.exe`（模拟盘 90000001）
+- `tray\BigQMT_Production_ReadOnly.exe`（正式只读 90000002）
 
 这是由 Windows 自带 .NET 编译器直接编译的 EXE，不使用 PyInstaller 自解压、加壳或混淆。两个 EXE 都不含下单或撤单菜单。
 EXE 图标和托盘图标使用账户专属标识：模拟盘为天蓝色 `S`，正式只读为深蓝色 `P`；运行状态异常或降级时托盘图标变为深红色。

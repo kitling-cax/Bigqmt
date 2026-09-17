@@ -29,7 +29,7 @@ def check_portable_deployment(root: Path, profile: str) -> dict[str, Any]:
     checks.append(_check("project_root", root.is_dir(), str(root)))
     for relative in (
         "tray/BigQMTTray.ps1", "tray/launch_simulation_tray.cmd", "tray/launch_production_readonly_tray.cmd",
-        "tray/BigQMT_Simulation_90000001.exe", "tray/BigQMT_Production_ReadOnly_90000002.exe", "tray/BigQMT_native_tray_checksums.sha256",
+        "tray/BigQMT_Simulation.exe", "tray/BigQMT_Production_ReadOnly.exe", "tray/BigQMT_native_tray_checksums.sha256",
         "scripts/qmt_launcher_cli.py", "scripts/manage_qmt_login_credential.py", "scripts/check_bridge_ping.py", "scripts/launch_tray_detached.py", "scripts/diagnose_tray.py",
         "src/kitling_bigqmt/qmt_launcher.py", "src/kitling_bigqmt/qmt_credentials.py", "src/kitling_bigqmt/bridge_probe.py", "src/kitling_bigqmt/tray_diagnostics.py",
         "requirements-tray.txt",
@@ -59,7 +59,7 @@ def check_portable_deployment(root: Path, profile: str) -> dict[str, Any]:
     launcher_for_profile = simulation_launcher if profile == "simulation" else production_launcher
     checks.append(_check("tray_sta_guard", "requires an STA PowerShell host" in tray_script.read_text(encoding="utf-8") if tray_script.is_file() else False,
                          "tray script must reject non-STA hosts"))
-    native_exe = "BigQMT_Simulation_90000001.exe" if profile == "simulation" else "BigQMT_Production_ReadOnly_90000002.exe"
+    native_exe = "BigQMT_Simulation.exe" if profile == "simulation" else "BigQMT_Production_ReadOnly.exe"
     checks.append(_check("native_account_launcher", native_exe in launcher_for_profile.read_text(encoding="utf-8") if launcher_for_profile.is_file() else False,
                          "profile launcher must start only its dedicated native account EXE"))
 

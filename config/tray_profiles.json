@@ -4,7 +4,7 @@
     "simulation": {
       "display_name": "BigQMT 模拟盘",
       "account_id": "90000001",
-      "qmt_root": "F:\\kitling_QMT_work\\国金QMT交易端模拟",
+      "qmt_root": "C:\\BigQMT\\work\\国金QMT交易端模拟",
       "qmt_launch": {"mode": "login", "terminal_target": "bigqmt_unchecked_independent_trading", "window_title_prefix": "国金QMT交易端模拟", "ready_port": 58600, "auto_start_missing": true, "auto_restart_unhealthy": false},
       "miniqmt_launch": {"enabled": true, "mode": "linkmini", "auto_start_missing": true, "auto_restart_unhealthy": false},
       "redis": {"host": "127.0.0.1", "port": 6379, "db": 5},
@@ -15,7 +15,7 @@
     "production_readonly": {
       "display_name": "BigQMT 正式盘只读",
       "account_id": "90000002",
-      "qmt_root": "F:\\kitling_QMT_work\\国金证券QMT交易端",
+      "qmt_root": "C:\\BigQMT\\work\\国金证券QMT交易端",
       "qmt_launch": {"mode": "login", "terminal_target": "bigqmt_unchecked_independent_trading", "window_title_prefix": "国金证券QMT交易端", "ready_port": 58600, "auto_start_missing": true, "auto_restart_unhealthy": false},
       "miniqmt_launch": {"enabled": true, "mode": "linkmini", "auto_start_missing": true, "auto_restart_unhealthy": false},
       "redis": {"host": "127.0.0.1", "port": 6380, "db": 5},

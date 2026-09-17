@@ -107,7 +107,7 @@ def test_intent_preview_status_is_aggregate_readonly_and_never_exposes_intents()
     assert payload["readonly"] is True
     assert payload["orders_enabled"] is False
     assert [(item["host_id"], item["account_id"], item["intent_count"]) for item in payload["targets"]] == [
-        ("host-105", "90000002", 0), ("host-105", "90000001", 0)
+        ("host-105", "90000001", 0), ("host-105", "90000002", 0)
     ]
     assert "intents" not in payload
 

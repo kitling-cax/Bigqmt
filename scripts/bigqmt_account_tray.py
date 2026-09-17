@@ -44,9 +44,9 @@ _USER32 = ctypes.windll.user32
 def _profile_icon_path(profile: str) -> Path:
     """Return the profile-specific icon placed beside the account EXE."""
     name = (
-        "BigQMT_Simulation_90000001.ico"
+        "BigQMT_Simulation.ico"
         if profile == "simulation"
-        else "BigQMT_Production_ReadOnly_90000002.ico"
+        else "BigQMT_Production_ReadOnly.ico"
     )
     return ROOT / "tray" / name
 

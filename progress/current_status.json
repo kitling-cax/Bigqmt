@@ -614,14 +614,14 @@
       "tests/test_host_agent_intent_preview.py::test_probe_cli_stays_fail_closed_when_the_coordinator_is_unreachable"
     ],
     "orders_enabled": false,
-    "production_live_evidence": "tray BigQMT_Production_ReadOnly_90000002.exe restarted 2026-09-15T23:18:47+08:00 (PID 10284); runtime_data/audit/production_readonly/native_tray.jsonl records coordinator_intent_preview empty_readonly; readonly=true; orders_enabled=false and auto-pulled Redis 6380 plus dashboard 17891 from down to listening"
+    "production_live_evidence": "tray BigQMT_Production_ReadOnly.exe restarted 2026-09-15T23:18:47+08:00 (PID 10284); runtime_data/audit/production_readonly/native_tray.jsonl records coordinator_intent_preview empty_readonly; readonly=true; orders_enabled=false and auto-pulled Redis 6380 plus dashboard 17891 from down to listening"
   },
   "latest_native_tray_build": {
     "built_at": "2026-09-17T13:55:00+08:00",
     "build_script": "scripts/build_native_account_trays.ps1",
     "executables": [
-      "tray/BigQMT_Simulation_90000001.exe",
-      "tray/BigQMT_Production_ReadOnly_90000002.exe"
+      "tray/BigQMT_Simulation.exe",
+      "tray/BigQMT_Production_ReadOnly.exe"
     ],
     "checksums": "tray/BigQMT_native_tray_checksums.sha256",
     "simulation_sha256": "9A9EF983574157F7A73992B924E1B282491C2D4D6AC3B0CEF165CDE9803551C5",
@@ -715,15 +715,15 @@
       "script": "scripts/build_native_account_trays.ps1",
       "built_at": "2026-09-16T09:27:30+08:00",
       "sha256": {
-        "BigQMT_Simulation_90000001.exe": "25B97F62D692515981572E0F1D8885E1A8F5B0D9E84E24739B4A070FE3C70B26",
-        "BigQMT_Production_ReadOnly_90000002.exe": "5DC4A81AC103109C7B696D5B0390E1DE6E012006545034775D5F0476EA474D13"
+        "BigQMT_Simulation.exe": "25B97F62D692515981572E0F1D8885E1A8F5B0D9E84E24739B4A070FE3C70B26",
+        "BigQMT_Production_ReadOnly.exe": "5DC4A81AC103109C7B696D5B0390E1DE6E012006545034775D5F0476EA474D13"
       },
       "checksum_file_match": true,
       "source_mtime": "2026-09-16T09:23:19+08:00",
       "restarted_at": "2026-09-16T09:28:40+08:00",
       "restarted_pids": {
-        "BigQMT_Simulation_90000001": 12768,
-        "BigQMT_Production_ReadOnly_90000002": 11680
+        "BigQMT_Simulation": 12768,
+        "BigQMT_Production_ReadOnly": 11680
       }
     },
     "verification": {

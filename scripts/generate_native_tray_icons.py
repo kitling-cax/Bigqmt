@@ -31,8 +31,8 @@ def _write(name: str, rgb: tuple[int, int, int], letter: str) -> None:
 
 
 def main() -> int:
-    _write("BigQMT_Simulation_90000001.ico", (50, 169, 232), "S")
-    _write("BigQMT_Production_ReadOnly_90000002.ico", (20, 58, 122), "P")
+    _write("BigQMT_Simulation.ico", (50, 169, 232), "S")
+    _write("BigQMT_Production_ReadOnly.ico", (20, 58, 122), "P")
     return 0
 
 

@@ -1574,7 +1574,7 @@
     {
       "name": "native_tray_audit_jsonl_escaping_repair_20260916",
       "status": "PASSED",
-      "evidence": "tray/BigQMTAccountTray.cs; tray/BigQMT_Simulation_90000001.exe; tray/BigQMT_Production_ReadOnly_90000002.exe; tray/BigQMT_native_tray_checksums.sha256; src/kitling_bigqmt/audit_log_integrity.py; scripts/check_audit_log_integrity.py; tests/test_audit_log_integrity.py; runtime_data/audit/simulation/native_tray.jsonl; runtime_data/audit/production_readonly/native_tray.jsonl",
+      "evidence": "tray/BigQMTAccountTray.cs; tray/BigQMT_Simulation.exe; tray/BigQMT_Production_ReadOnly.exe; tray/BigQMT_native_tray_checksums.sha256; src/kitling_bigqmt/audit_log_integrity.py; scripts/check_audit_log_integrity.py; tests/test_audit_log_integrity.py; runtime_data/audit/simulation/native_tray.jsonl; runtime_data/audit/production_readonly/native_tray.jsonl",
       "details": [
         "defect: tray Audit() hand-built JSON and escaped only backslash and double quote, so detail text containing raw control characters produced multi-line records that line-oriented readers silently skip",
         "measured before fix: simulation native_tray.jsonl 9494 records with 762 unparseable; production_readonly 9088 records with 697 unparseable",

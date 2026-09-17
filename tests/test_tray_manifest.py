@@ -24,8 +24,8 @@ def test_tray_manifest_contains_only_fail_closed_release_files(tmp_path: Path):
     assert manifest["supports_miniqmt_linkmini_passwordless"] is True
     assert len(manifest["files"]) == 20
     assert manifest["missing_files"] == [
-        "tray/BigQMT_Simulation_90000001.exe",
-        "tray/BigQMT_Production_ReadOnly_90000002.exe",
+        "tray/BigQMT_Simulation.exe",
+        "tray/BigQMT_Production_ReadOnly.exe",
     ]
     assert all(len(item["sha256"]) == 64 for item in manifest["files"])
 

@@ -148,7 +148,7 @@ M03 剩余待收口项：Host Agent 执行租约仍为 `LEASED_EXECUTION_NOT_ENA
 - `.121` `/healthz`、`/readyz`、`/api/v1/progress` 均从本机访问返回 200；新增 `host_agent_snapshot.py` 只读心跳边界及测试，未连接真实 Host Agent。
 - 新增 `host_agent_client.py` outbound 只读客户端；首版强制 `HEALTHY_READONLY`，只 POST 心跳到 `/api/v1/hosts/heartbeat`，7 个相关测试通过；尚未接入托盘或真实 QMT。
 - `.121` bootstrap 已更新并重启；`192.0.2.105` 通过真实客户端发送只读心跳返回 `202 accepted`，`/api/v1/hosts` 可读取最近主机状态。
-- 已在隔离 PyInstaller 环境完成两个新版 onedir 托盘构建；现有根目录 EXE 未替换。输出位于 `tray/BigQMT_模拟盘_90000001/` 与 `tray/BigQMT_正式只读_90000002/`，待启动烟测通过后再制作正式发布布局。
+- 已在隔离 PyInstaller 环境完成两个新版 onedir 托盘构建；现有根目录 EXE 未替换。输出位于 `tray/BigQMT_模拟盘/` 与 `tray/BigQMT_正式只读/`，待启动烟测通过后再制作正式发布布局。
 - 已整理隔离候选发布包 `dist/tray_candidate_20260914/`，含模拟/正式只读启动器和回滚说明；原根目录启动器保持不变。
 - 候选托盘实际启动暴露 pywin32 `Shell_NotifyIcon` 句柄类型错误；已修复为保存并复用 `PyHANDLE` 图标句柄，待重新编译候选 EXE。
 - 已重新编译并更新候选包；模拟盘候选托盘实际启动后持续运行，`.121 /api/v1/hosts` 收到最新只读心跳，`sent_at=2026-09-14T09:32:33Z`。
@@ -816,7 +816,7 @@ SSH 只读预检确认：`.121` 可达，现有 `kitling-bigqmt-coordinator.serv
 
 ## 2026-09-17 13:58 · `.105` Native Tray facts-only Tick 正式部署
 
-两个旧托盘退出后，重新编译并启动 `BigQMT_Simulation_90000001.exe`（PID 27644）与 `BigQMT_Production_ReadOnly_90000002.exe`（PID 23144）。新版本的每 5 分钟 facts-only tick 已在两个 profile 各成功投递一次，Shadow 返回 `202 ACCEPTED`、`pending=0`；Redis 与 Dashboard 被托盘自动补拉后恢复，两个托盘状态均回到「在线」。模拟与正式 Bridge 只读 ping 通过，正式账户 `allow_order_methods=false`；v1.1.15 当日 cycle 因真实成交持有期 guard（4/5）安全阻断，未产生 broker/order call。详见 `docs/152_native_tray_fact_tick_deployed_2026-09-17.md`。
+两个旧托盘退出后，重新编译并启动 `BigQMT_Simulation.exe`（PID 27644）与 `BigQMT_Production_ReadOnly.exe`（PID 23144）。新版本的每 5 分钟 facts-only tick 已在两个 profile 各成功投递一次，Shadow 返回 `202 ACCEPTED`、`pending=0`；Redis 与 Dashboard 被托盘自动补拉后恢复，两个托盘状态均回到「在线」。模拟与正式 Bridge 只读 ping 通过，正式账户 `allow_order_methods=false`；v1.1.15 当日 cycle 因真实成交持有期 guard（4/5）安全阻断，未产生 broker/order call。详见 `docs/152_native_tray_fact_tick_deployed_2026-09-17.md`。
 
 ## 2026-09-17 · `.125/.113` Host Agent 0.1.0 Shadow 候选包
 

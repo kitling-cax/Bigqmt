@@ -31,8 +31,8 @@ staging/**/bigqmt_signal_trader_local_config.py
 portable/**
 deploy/backups/**
 vendor/redis/**
-tray/BigQMT_模拟盘_90000001/**
-tray/BigQMT_正式只读_90000002/**
+tray/BigQMT_模拟盘/**
+tray/BigQMT_正式只读/**
 *.exe
 *.dll
 *.pdb
@@ -46,3 +46,6 @@ pytest_out.txt
 test_out.txt
 .vscode/
 .idea/
+
+# Public source never tracks generated per-account tray directories
+tray/BigQMT_*/*

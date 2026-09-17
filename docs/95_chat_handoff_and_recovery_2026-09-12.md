@@ -62,7 +62,7 @@ Design-B proxy settings were retained:
 
 - `openai_base_url = "http://127.0.0.1:10100/v1"`
 - `experimental_realtime_ws_base_url = "http://127.0.0.1:10100/v1"`
-- `model_catalog_json = "C:\\Users\\kitling\\.codex\\opencodex-catalog.json"`
+- `model_catalog_json = "C:\\Users\\developer\\.codex\\opencodex-catalog.json"`
 
 Python `tomllib` successfully parsed the resulting configuration and confirmed
 the selected provider is `openai`.  Codex should now be restarted or this

@@ -11,9 +11,9 @@ def _write_profile(root: Path, *, formal: bool) -> None:
     (qmt_root / "bin.x64" / "XtItClient.exe").write_bytes(b"placeholder")
     (root / "tray").mkdir()
     (root / "tray" / "BigQMTTray.ps1").write_text("requires an STA PowerShell host", encoding="utf-8")
-    (root / "tray" / "launch_simulation_tray.cmd").write_text("BigQMT_Simulation_90000001.exe", encoding="utf-8")
-    (root / "tray" / "launch_production_readonly_tray.cmd").write_text("BigQMT_Production_ReadOnly_90000002.exe", encoding="utf-8")
-    for name in ("BigQMT_Simulation_90000001.exe", "BigQMT_Production_ReadOnly_90000002.exe", "BigQMT_native_tray_checksums.sha256"):
+    (root / "tray" / "launch_simulation_tray.cmd").write_text("BigQMT_Simulation.exe", encoding="utf-8")
+    (root / "tray" / "launch_production_readonly_tray.cmd").write_text("BigQMT_Production_ReadOnly.exe", encoding="utf-8")
+    for name in ("BigQMT_Simulation.exe", "BigQMT_Production_ReadOnly.exe", "BigQMT_native_tray_checksums.sha256"):
         (root / "tray" / name).write_bytes(b"placeholder")
     (root / "scripts").mkdir()
     for name in ("qmt_launcher_cli.py", "manage_qmt_login_credential.py", "check_bridge_ping.py", "launch_tray_detached.py", "diagnose_tray.py"):

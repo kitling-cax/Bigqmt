@@ -24,6 +24,8 @@ jobs:
           python -m pip install -e .
       - name: Run isolated unit tests
         run: python -m pytest -q
+      - name: Public-source safety gate
+        run: python scripts/check_public_safety.py
       - name: Build facts-only portable Host Trays
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_portable_host_bundles.ps1

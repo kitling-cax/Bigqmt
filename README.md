@@ -5,6 +5,11 @@ share strategy execution, accounting and monitoring. It begins with
 simulation-first validation and keeps production accounts read-only until the
 separate production admission gates are explicitly approved.
 
+The source tree is publishable: account values in committed examples are
+synthetic identifiers only. Real QMT credentials, Fact Secrets, execution
+keys, machine-local paths and runtime state stay outside Git and are injected
+on each host.
+
 ## Source and release policy
 
 - GitHub repository `kitling-cax/Bigqmt` is the sole source of code, tests,

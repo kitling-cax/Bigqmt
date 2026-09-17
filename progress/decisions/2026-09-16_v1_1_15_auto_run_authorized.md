@@ -15,9 +15,9 @@
    - simulation.v1_1_15_preflight_only_dates 从 ["2026-09-16"] 改为 []
    - simulation.v1_1_15_auto_run_enabled 保持 true
 2. 不需要重启任何进程：
-   - 模拟 native tray（PID 22808 BigQMT_Simulation_90000001.exe）每 30 秒 tick 时
+   - 模拟 native tray（PID 22808 BigQMT_Simulation.exe）每 30 秒 tick 时
      重新读 strategy_runtime_policy.json，新配置立即生效。
-   - 正式 native tray（PID 6996 BigQMT_Production_ReadOnly_90000002.exe）的
+   - 正式 native tray（PID 6996 BigQMT_Production_ReadOnly.exe）的
      RunSchedulerJobs 直接 if (Profile != "simulation") return;，根本不调 cycle。
 
 ## 自动交易机制（已经存在，无需新增代码）
