@@ -33,6 +33,10 @@ TRAY_FILES = (
     "src/kitling_bigqmt/portable_deployment.py",
     "src/kitling_bigqmt/local_backup.py",
 )
+GENERATED_TRAY_FILES = {
+    "tray/BigQMT_Simulation_90000001.exe",
+    "tray/BigQMT_Production_ReadOnly_90000002.exe",
+}
 
 
 def sha256(path: Path) -> str:
@@ -43,12 +47,25 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build(output: Path, release_id: str) -> dict:
+def build(output: Path, release_id: str, *, strict: bool = True) -> dict:
+    """Build a release manifest.
+
+    A real release is strict and must include the two compiled native Tray
+    executables. Source-only CI intentionally uses ``strict=False`` so it
+    validates the manifest contract without committing generated binaries.
+    """
     files = []
+    missing_files = []
     for relative in TRAY_FILES:
+        if not strict and relative in GENERATED_TRAY_FILES:
+            missing_files.append(relative)
+            continue
         path = ROOT / relative
         if not path.is_file():
-            raise FileNotFoundError(relative)
+            if strict:
+                raise FileNotFoundError(relative)
+            missing_files.append(relative)
+            continue
         files.append({"path": relative, "sha256": sha256(path), "bytes": path.stat().st_size})
     manifest = {
         "schema_version": 1,
@@ -61,6 +78,7 @@ def build(output: Path, release_id: str) -> dict:
         "auto_login_secrets_embedded": False,
         "supports_windows_credential_auto_login": True,
         "supports_miniqmt_linkmini_passwordless": True,
+        "missing_files": missing_files,
         "files": files,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
