@@ -4,12 +4,16 @@
 
 ```powershell
 cd E:\kitling_QMT_work
-git clone https://github.com/kitling-cax/Bigqmt.git kitling_bigqmt
-cd .\kitling_bigqmt
+git clone https://github.com/kitling-cax/Bigqmt.git Bigqmt-source
+cd .\Bigqmt-source
 Copy-Item .\config\hosts\125.machine.local.example.json .\config\machine.local.json
 git status
 git switch -c host/125/<short-topic>
 ```
+
+现有 `E:\kitling_QMT_work\kitling_bigqmt` 已有运行/Host Agent 文件。不要在其中
+clone 或覆盖；新的 `Bigqmt-source` 是 Git 源码工作目录，只从这里构建候选包，再
+显式部署到独立运行目录。
 
 然后只在本机编辑 `config/machine.local.json` 的路径、端口与 `host_id`。该文件已
 被 Git 忽略，不能提交密码、Secret、授权 Key 或 QMT 运行数据。
