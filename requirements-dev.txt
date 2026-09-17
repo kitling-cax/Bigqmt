@@ -1,0 +1,7 @@
+# Local and GitHub Actions validation dependencies.  This file contains no
+# broker, QMT, Redis, Coordinator or credential dependency.
+pytest>=8,<10
+pandas>=2.2,<3
+duckdb>=1.0,<2
+pyarrow>=17,<20
+tzdata>=2024.1

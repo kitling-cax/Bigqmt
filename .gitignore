@@ -22,6 +22,12 @@ logs/**
 releases/**
 dist/**
 staging/**
+!staging/
+!staging/qmt_bridge_simulation/
+!staging/qmt_bridge_simulation/**
+staging/**/__pycache__/**
+staging/**/runtime_data/**
+staging/**/bigqmt_signal_trader_local_config.py
 portable/**
 deploy/backups/**
 vendor/redis/**
