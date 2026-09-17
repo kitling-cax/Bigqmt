@@ -34,6 +34,7 @@ from kitling_bigqmt.tray_health import check_profile  # noqa: E402
 from kitling_bigqmt.host_agent_client import HostAgentClient  # noqa: E402
 from kitling_bigqmt.coordinator_endpoint import resolve_coordinator  # noqa: E402
 from kitling_bigqmt.host_agent_account_policy import resolve_account_policy  # noqa: E402
+from kitling_bigqmt.machine_config import load_tray_profiles  # noqa: E402
 
 
 WM_TRAY = win32con.WM_USER + 51
@@ -72,9 +73,21 @@ def _load_profile_icon(profile: str) -> int:
 class AccountTray:
     def __init__(self, profile: str) -> None:
         self.profile = profile
-        self.account = "90000001" if profile == "simulation" else "90000002"
+        # Account IDs are deployment-local data.  The committed defaults are
+        # synthetic; a real host supplies its account through the ignored
+        # machine.local.json overlay.  Never hard-code a broker account in the
+        # executable because that causes the Coordinator profile to diverge
+        # after a public-source build.
+        profiles = load_tray_profiles(ROOT).get("profiles", {})
+        profile_config = profiles.get(profile) if isinstance(profiles, dict) else None
+        if not isinstance(profile_config, dict):
+            profile_config = {}
+        fallback_account = "90000001" if profile == "simulation" else "90000002"
+        self.account = str(profile_config.get("account_id") or fallback_account)
         self.title = "BigQMT 模拟盘 %s" % self.account if profile == "simulation" else "BigQMT 正式只读 %s" % self.account
-        self.port = 17890 if profile == "simulation" else 17891
+        dashboard = profile_config.get("dashboard") if isinstance(profile_config.get("dashboard"), dict) else {}
+        fallback_port = 17890 if profile == "simulation" else 17891
+        self.port = int(dashboard.get("port") or fallback_port)
         self.class_name = "KitlingBigQMTTray-" + profile
         self.hwnd = 0
         self.icon = None
