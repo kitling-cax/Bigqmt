@@ -29,8 +29,9 @@ if (-not (Test-Path -LiteralPath $secretPath)) {
   if ($LASTEXITCODE -ne 0) { throw 'Fact Secret generation failed' }
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-& icacls $secretDir /inheritance:r /grant:r 'SYSTEM:(F)' 'BUILTIN\Administrators:(F)' "$identity:(F)" | Out-Null
-& icacls $secretPath /inheritance:r /grant:r 'SYSTEM:(F)' 'BUILTIN\Administrators:(F)' "$identity:(F)" | Out-Null
+$identityAce = "${identity}:(F)"
+& icacls $secretDir /inheritance:r /grant:r 'SYSTEM:(F)' 'BUILTIN\Administrators:(F)' $identityAce | Out-Null
+& icacls $secretPath /inheritance:r /grant:r 'SYSTEM:(F)' 'BUILTIN\Administrators:(F)' $identityAce | Out-Null
 
 if (-not (Test-Path -LiteralPath $auditPath)) {
   Start-Process -FilePath (Join-Path $Root 'BigQMT_HostTray.exe') -WorkingDirectory $Root
