@@ -1,0 +1,41 @@
+name: BigQMT source CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-tray:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -e .
+      - name: Run isolated unit tests
+        run: python -m pytest -q
+      - name: Build facts-only portable Host Trays
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_portable_host_bundles.ps1
+      - name: Reject machine-local and binary source artifacts
+        shell: pwsh
+        run: |
+          $bad = git ls-files | Where-Object { $_ -match '(^|/)(machine\.local\.json|.*\.sqlite3?(-wal|-shm)?|.*\.exe|.*\.dll)$|(^|/)(runtime_data|secrets)/' }
+          if ($bad) { throw "forbidden tracked paths: $($bad -join ', ')" }
+
+  coordinator-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Coordinator image only
+        run: docker build -f container/coordinator/Dockerfile -t bigqmt-coordinator:ci .
