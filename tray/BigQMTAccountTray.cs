@@ -219,6 +219,40 @@ internal static class BigQMTAccountTray
         return p;
     }
 
+    // The checked-in Redis templates intentionally use a neutral historical
+    // root so they are safe to publish.  Before starting Redis on a host,
+    // materialize a local config with the actual project root.  This keeps a
+    // migrated tray independent of C:\BigQMT and avoids the MSYS2 path/config
+    // failure that previously left the tray red after auto-repair.
+    private static string PrepareRedisConfig()
+    {
+        string template = Path.Combine(RootPath(), "config", "redis",
+            Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
+        string directory = Path.Combine(RootPath(), "runtime_data", "redis", Profile);
+        Directory.CreateDirectory(directory);
+        string materialized = Path.Combine(directory, "redis-autostart.conf");
+        string root = ToMsysPath(RootPath());
+        string text = File.ReadAllText(template, Encoding.UTF8)
+            .Replace("C:/BigQMT/work/kitling_bigqmt", root)
+            .Replace("C:\\BigQMT\\work\\kitling_bigqmt", root);
+        File.WriteAllText(materialized, text, new UTF8Encoding(false));
+        return materialized;
+    }
+
+    private static void StartRedisProcess()
+    {
+        string config = PrepareRedisConfig();
+        string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect",
+            "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
+        ProcessStartInfo info = new ProcessStartInfo();
+        info.FileName = exe;
+        info.Arguments = "\"" + ToMsysPath(config) + "\"";
+        info.WorkingDirectory = RootPath();
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        Process.Start(info);
+    }
+
     private static bool TcpAvailable(int port)
     {
         try
@@ -461,11 +495,10 @@ internal static class BigQMTAccountTray
         nextAutoRedisAttempt = DateTime.UtcNow.AddMinutes(2);
         try
         {
-            string config = Path.Combine(RootPath(), "config", "redis", Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
             string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect", "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
             if (!File.Exists(exe)) { Audit("redis_auto_start_error", "missing redis-server: " + exe); return; }
-            Process.Start(exe, ToMsysPath(config));
-            Audit("redis_auto_start_requested", config);
+            StartRedisProcess();
+            Audit("redis_auto_start_requested", Profile);
         }
         catch (Exception error) { Audit("redis_auto_start_error", error.GetType().Name + ": " + error.Message); }
     }
@@ -568,9 +601,8 @@ internal static class BigQMTAccountTray
     private static void StartRedis()
     {
         if (TcpAvailable(RedisPort)) { MessageBox.Show("Redis 已运行。", ProfileTitle); return; }
-        string config = Path.Combine(RootPath(), "config", "redis", Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
         string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect", "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
-        try { Process.Start(exe, ToMsysPath(config)); MessageBox.Show("Redis 启动请求已提交。", ProfileTitle); Audit("redis_start_requested", config); }
+        try { StartRedisProcess(); MessageBox.Show("Redis 启动请求已提交。", ProfileTitle); Audit("redis_start_requested", Profile); }
         catch (Exception error) { MessageBox.Show("Redis 无法启动：" + error.Message, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning); Audit("redis_start_error", error.Message); }
     }
 
