@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "comment": "Example only. Copy to machine.local.json and adjust locally; do not commit the copied file.",
+  "private_config": {
+    "file": "\\\\nas.example\\bigqmt-private\\hosts\\HOST_ID.json",
+    "comment": "Optional non-secret NAS overlay. Never place passwords, tokens, Fact Secrets or execution Keys here."
+  },
   "data_directory": "C:/BigQMT/work/kitling_bigqmt/runtime_data",
   "coordinator": {
     "endpoint": "http://192.0.2.121:18443",

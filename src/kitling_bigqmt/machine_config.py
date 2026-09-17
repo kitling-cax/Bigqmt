@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,13 @@ SUPPORTED_PROFILES = ("simulation", "production_readonly")
 
 class MachineLocalConfigError(RuntimeError):
     """machine.local.json is present but malformed; runtime entry points must fail closed."""
+
+
+PRIVATE_CONFIG_ENV = "BIGQMT_PRIVATE_CONFIG_FILE"
+_PRIVATE_CONFIG_KEY_RE = re.compile(
+    r"(?:password|passwd|secret|token|credential|authorization|private[_-]?key|api[_-]?key)",
+    re.IGNORECASE,
+)
 
 _BS = chr(92)  # backslash, kept out of source to avoid escaping hazards
 _ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/](?!/)[^\"' ]+")
@@ -63,6 +71,45 @@ def env_name(profile: str) -> str:
     raise ValueError("unsupported profile: %s" % profile)
 
 
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _reject_private_config_secrets(value: Any, path: str = "") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _PRIVATE_CONFIG_KEY_RE.search(str(key)):
+                raise MachineLocalConfigError(
+                    "NAS private config contains a forbidden secret field: %s" % (path + str(key))
+                )
+            _reject_private_config_secrets(child, path + str(key) + ".")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_private_config_secrets(child, path + str(index) + ".")
+
+
+def _load_private_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MachineLocalConfigError("private config is unavailable or invalid: %s" % path) from exc
+    if not isinstance(data, dict):
+        raise MachineLocalConfigError("private config must be a JSON object: %s" % path)
+    _reject_private_config_secrets(data)
+    expected = os.environ.get("BIGQMT_PRIVATE_CONFIG_SHA256", "").strip().lower()
+    if expected:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected:
+            raise MachineLocalConfigError("private config SHA-256 does not match the pinned value")
+    return data
+
+
 def load_machine_local(root: Path | None = None) -> dict[str, Any]:
     """Read the machine-local override file.
 
@@ -72,17 +119,24 @@ def load_machine_local(root: Path | None = None) -> dict[str, Any]:
     """
     root = Path(root) if root else project_root()
     path = root / "config" / MACHINE_LOCAL_FILENAME
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MachineLocalConfigError(
-            "machine.local.json is not a valid JSON file: %s" % exc
-        ) from exc
-    if not isinstance(data, dict):
-        raise MachineLocalConfigError("machine.local.json must be a JSON object")
-    return data
+    local: dict[str, Any] = {}
+    if path.exists():
+        try:
+            local = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MachineLocalConfigError(
+                "machine.local.json is not a valid JSON file: %s" % exc
+            ) from exc
+        if not isinstance(local, dict):
+            raise MachineLocalConfigError("machine.local.json must be a JSON object")
+
+    private = local.get("private_config") if isinstance(local.get("private_config"), dict) else {}
+    private_file = str(private.get("file") or os.environ.get(PRIVATE_CONFIG_ENV, "")).strip()
+    if not private_file:
+        return local
+    remote = _load_private_file(Path(private_file).expanduser())
+    # The host-local file wins for emergency overrides; NAS supplies portable defaults.
+    return _deep_merge(remote, local)
 
 
 def machine_environment(machine: dict[str, Any], profile: str) -> dict[str, Any]:
