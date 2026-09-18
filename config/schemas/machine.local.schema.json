@@ -17,6 +17,14 @@
         "host_id": {"type": "string", "minLength": 1}
       }
     },
+    "host_agent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "fact_secret_path": {"type": "string", "minLength": 1},
+        "outbox_path": {"type": "string", "minLength": 1}
+      }
+    },
     "environments": {
       "type": "object",
       "additionalProperties": true,

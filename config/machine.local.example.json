@@ -11,6 +11,10 @@
     "endpoint": "http://192.0.2.121:18443",
     "host_id": "REPLACE_WITH_THIS_WINDOWS_HOST_IP"
   },
+  "host_agent": {
+    "fact_secret_path": "C:/ProgramData/Kitling/BigQMT/host-facts/REPLACE_WITH_HOST_FACT_KEY.json",
+    "comment": "Local-only path. The Fact Secret value is never stored in Git or NAS strategy packages."
+  },
   "environments": {
     "simulation": {
       "qmt_root": "C:/BigQMT/work/国金QMT交易端模拟",

@@ -39,6 +39,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem dashboardItem;
     private static ToolStripMenuItem coordinatorItem;
     private static ToolStripMenuItem intentItem;
+    private static ToolStripMenuItem hostAgentItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
     private static MutexHandle mutex;
@@ -52,6 +53,11 @@ internal static class BigQMTAccountTray
     private static DateTime nextAutoDashboardAttempt = DateTime.MinValue;
     private static string lastCoordinatorHeartbeatState = "";
     private static string lastCoordinatorIntentState = "";
+    private static string hostAgentState = "未初始化";
+    private static string hostAgentDetail = "等待首次心跳";
+    private static string configuredHostId = "";
+    private static string configuredCoordinatorEndpoint = "";
+    private static string configuredFactSecretPath = "";
 
     // v1.1.15 unattended simulation schedule (simulation profile only).
     // This tray never submits an order itself. It only invokes the fail-closed
@@ -96,6 +102,7 @@ internal static class BigQMTAccountTray
     [STAThread]
     private static void Main()
     {
+        LoadRuntimeNodeConfig();
         Account = LoadConfiguredAccount();
         mutex = new MutexHandle("Local\\KitlingBigQMTNativeTray-" + Profile);
         if (!mutex.IsFirstInstance) return;
@@ -113,6 +120,7 @@ internal static class BigQMTAccountTray
         dashboardItem = new ToolStripMenuItem("Dashboard：检查中"); dashboardItem.Enabled = false; menu.Items.Add(dashboardItem);
         coordinatorItem = new ToolStripMenuItem("Coordinator：检查中（只读）"); coordinatorItem.Enabled = false; menu.Items.Add(coordinatorItem);
         intentItem = new ToolStripMenuItem("Intents：检查中（只读预览）"); intentItem.Enabled = false; menu.Items.Add(intentItem);
+        hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
         services.DropDownItems.Add("启动缺失的 QMT", null, delegate { StartQmt(false); });
@@ -122,6 +130,7 @@ internal static class BigQMTAccountTray
         services.DropDownItems.Add("启动缺失的 Redis", null, delegate { StartRedis(); });
         services.DropDownItems.Add("确保本地看板运行", null, delegate { EnsureDashboard(); });
         services.DropDownItems.Add("立即探测 Bridge（只读）", null, delegate { ProbeBridge(); });
+        services.DropDownItems.Add("立即同步 Host Agent（只读）", null, delegate { HostAgentSyncNow(); });
         menu.Items.Add(services);
         menu.Items.Add("打开看板", null, delegate { OpenDashboard(); });
         menu.Items.Add("打开本账户日志", null, delegate { OpenLogs(); });
@@ -157,7 +166,7 @@ internal static class BigQMTAccountTray
         tray.Visible = true;
         tray.DoubleClick += delegate { OpenDashboard(); };
         Application.ApplicationExit += delegate { tray.Visible = false; if (trayIcon != null) trayIcon.Dispose(); Audit("tray_stopped", "user_exit"); mutex.Dispose(); };
-        Audit("tray_started", "native_dotnet_one_account_exe; read_only");
+        Audit("tray_started", "native_dotnet_one_account_exe; host_agent_embedded=true; read_only");
         windowsStartupItem.Checked = WindowsStartupEnabled();
         strategyPolicyItem.Checked = StrategyPolicyEnabled();
         RefreshStatus();
@@ -171,6 +180,82 @@ internal static class BigQMTAccountTray
     private static string RootPath()
     {
         return Directory.GetParent(Application.StartupPath).FullName;
+    }
+
+    private static System.Collections.Generic.Dictionary<string, object> LoadMachineLocal()
+    {
+        try
+        {
+            string path = Path.Combine(RootPath(), "config", "machine.local.json");
+            if (!File.Exists(path)) return new System.Collections.Generic.Dictionary<string, object>();
+            object root = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path, Encoding.UTF8));
+            return root as System.Collections.Generic.Dictionary<string, object>
+                ?? new System.Collections.Generic.Dictionary<string, object>();
+        }
+        catch { return new System.Collections.Generic.Dictionary<string, object>(); }
+    }
+
+    private static string NestedConfigString(System.Collections.Generic.Dictionary<string, object> root, string section, string key)
+    {
+        object sectionValue;
+        if (!root.TryGetValue(section, out sectionValue)) return "";
+        var sectionMap = sectionValue as System.Collections.Generic.Dictionary<string, object>;
+        if (sectionMap == null) return "";
+        object value;
+        return sectionMap.TryGetValue(key, out value) && value != null ? Convert.ToString(value).Trim() : "";
+    }
+
+    private static void LoadRuntimeNodeConfig()
+    {
+        var machine = LoadMachineLocal();
+        configuredHostId = NestedConfigString(machine, "coordinator", "host_id");
+        configuredCoordinatorEndpoint = NestedConfigString(machine, "coordinator", "endpoint");
+        configuredFactSecretPath = NestedConfigString(machine, "host_agent", "fact_secret_path");
+        if (configuredHostId.Length == 0) configuredHostId = "192.0.2.105";
+        if (configuredCoordinatorEndpoint.Length == 0) configuredCoordinatorEndpoint = "http://192.0.2.121:18443";
+    }
+
+    private static string HostId()
+    {
+        return configuredHostId.Length == 0 ? "192.0.2.105" : configuredHostId;
+    }
+
+    private static string ShadowCoordinatorEndpoint()
+    {
+        try
+        {
+            Uri uri = new Uri(configuredCoordinatorEndpoint);
+            UriBuilder builder = new UriBuilder(uri);
+            builder.Port = 18666;
+            builder.Path = "/api/v1/facts/ingest";
+            builder.Query = "";
+            return builder.Uri.ToString();
+        }
+        catch { return "http://192.0.2.121:18666/api/v1/facts/ingest"; }
+    }
+
+    private static string FactSecretPath()
+    {
+        string configured = configuredFactSecretPath;
+        if (configured.Length > 0)
+        {
+            configured = Environment.ExpandEnvironmentVariables(configured);
+            if (!Path.IsPathRooted(configured)) configured = Path.Combine(RootPath(), configured);
+            if (File.Exists(configured)) return configured;
+        }
+        string safeHost = HostId().Replace('.', '_').Replace(':', '_').Replace('/', '_');
+        string shortHost = safeHost;
+        int lastSeparator = safeHost.LastIndexOf('_');
+        if (lastSeparator >= 0 && lastSeparator + 1 < safeHost.Length) shortHost = safeHost.Substring(lastSeparator + 1);
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Kitling", "BigQMT");
+        string[] candidates = new string[] {
+            Path.Combine(root, "host-facts", "host-" + safeHost + "-fact-shadow.json"),
+            Path.Combine(root, "host-facts", "host-" + shortHost + "-fact-shadow-20260917.json"),
+            Path.Combine(root, "secrets", "host-" + safeHost + "-fact-shadow.json"),
+            Path.Combine(root, "secrets", "host-" + shortHost + "-fact-shadow.json")
+        };
+        foreach (string candidate in candidates) if (File.Exists(candidate)) return candidate;
+        return candidates[0];
     }
 
     private static string LoadConfiguredAccount()
@@ -305,12 +390,14 @@ internal static class BigQMTAccountTray
         redisItem.Text = "Redis：" + (redis ? "正常" : "不可达（将自动补拉）") + "（端口 " + RedisPort + "）";
         bridgeItem.Text = "Bridge：" + bridgeState + "｜快照 " + runtimeHealth;
         dashboardItem.Text = "Dashboard：" + (dashboard ? "正常" : "不可达（将自动补拉）") + "（端口 " + DashboardPort + "）";
+        hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
         RefreshCoordinatorPreview();
         RefreshCoordinatorIntentPreview();
         string tip = ProfileTitle + " " + Account + "｜" + state;
         tray.Text = tip.Substring(0, Math.Min(63, tip.Length));
         SetIcon(state);
         SendCoordinatorHeartbeat(qmt, miniQmt, redis, dashboard);
+        hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
         Audit("status_refreshed", state + "; " + detail);
         AutoStartMissingQmt(qmt);
         AutoStartMissingMiniQmt(miniQmt);
@@ -352,9 +439,41 @@ internal static class BigQMTAccountTray
             6000,
             out ok
         );
+        if (ok)
+        {
+            hostAgentState = "心跳正常";
+            hostAgentDetail = "只读服务已上报";
+        }
+        else
+        {
+            hostAgentState = "心跳失败";
+            hostAgentDetail = "Coordinator不可达，继续本地运行";
+        }
         if (!ok || signature != lastCoordinatorHeartbeatState)
             Audit("coordinator_heartbeat", ok ? "accepted; " + signature : output);
         lastCoordinatorHeartbeatState = signature;
+    }
+
+    private static void HostAgentSyncNow()
+    {
+        // Keep the menu responsive: the facts-only uploader may wait on a
+        // network timeout.  It never has an order, lease, QMT or Redis write
+        // path, and the normal 5-minute scheduler remains unchanged.
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                nextFactDeliveryAttempt = DateTime.MinValue;
+                HostFactDeliveryIfDue(DateTime.Now);
+                Audit("host_agent_manual_sync", hostAgentState + "; " + hostAgentDetail);
+            }
+            catch (Exception error)
+            {
+                hostAgentState = "同步异常";
+                hostAgentDetail = error.GetType().Name;
+                Audit("host_agent_manual_sync_error", error.GetType().Name + ": " + error.Message);
+            }
+        });
     }
 
     private static void RefreshCoordinatorPreview()
@@ -767,9 +886,11 @@ internal static class BigQMTAccountTray
         // this release.  The command itself also refuses non-18666 endpoints.
         if (now < nextFactDeliveryAttempt) return;
         nextFactDeliveryAttempt = now.AddMinutes(5);
-        string secret = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Kitling", "BigQMT", "secrets", "host-105-fact-shadow.json");
+        string secret = FactSecretPath();
         if (!File.Exists(secret))
         {
+            hostAgentState = "等待 Fact Secret";
+            hostAgentDetail = "本机授权文件不存在";
             Audit("host_fact_delivery_blocked", "fact_secret_missing; orders_enabled=false");
             return;
         }
@@ -780,14 +901,18 @@ internal static class BigQMTAccountTray
         string auditArg = "\"" + auditPath + "\"";
         string outboxArg = "\"" + outboxPath + "\"";
         bool collected;
-        string collect = RunPython("host_agent\\collect_runtime_fact.py", "--profile " + Profile + " --host-id 192.0.2.105 --audit-path " + auditArg + " --outbox-path " + outboxArg, 15000, out collected);
+        string collect = RunPython("host_agent\\collect_runtime_fact.py", "--profile " + Profile + " --host-id " + HostId() + " --audit-path " + auditArg + " --outbox-path " + outboxArg, 15000, out collected);
         if (!collected)
         {
+            hostAgentState = "采集失败";
+            hostAgentDetail = "本地审计事实未生成";
             Audit("host_fact_collect_blocked", collect.TrimStart());
             return;
         }
         bool delivered;
-        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --endpoint http://192.0.2.121:18666/api/v1/facts/ingest", 20000, out delivered);
+        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --endpoint \"" + ShadowCoordinatorEndpoint() + "\"", 20000, out delivered);
+        hostAgentState = delivered ? "事实投递正常" : "事实待重试";
+        hostAgentDetail = delivered ? "Outbox已确认" : "Outbox保留待补传";
         Audit(delivered ? "host_fact_delivery" : "host_fact_delivery_retry_pending", deliver.TrimStart());
     }
 
@@ -933,6 +1058,7 @@ internal static class BigQMTAccountTray
             || lower.IndexOf("connection") >= 0 || lower.IndexOf("refused") >= 0
             || lower.IndexOf("redis") >= 0 || lower.IndexOf("rpc") >= 0
             || lower.IndexOf("duplicate") >= 0 || lower.IndexOf("admission") >= 0
+            || lower.IndexOf("open orders") >= 0
             || lower.IndexOf("reconciliation") >= 0;
         if (retryable)
         {
