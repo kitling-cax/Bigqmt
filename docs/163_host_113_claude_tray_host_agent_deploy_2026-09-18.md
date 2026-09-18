@@ -27,15 +27,15 @@ git status --short
 git fetch origin --prune
 ```
 
-如果 `git status` 显示已有未提交改动，先报告文件列表，不得 reset、clean 或覆盖。确认工作区可操作后，使用 `.113` 主机分支：
+如果 `git status` 显示已有未提交改动，先报告文件列表，不得 reset、clean 或覆盖。确认工作区可操作后，使用 `.113` 结构发布分支 `host/113/structure`：
 
 ```powershell
-git show-ref --verify --quiet refs/remotes/origin/host/113
+git show-ref --verify --quiet refs/remotes/origin/host/113/structure
 if ($LASTEXITCODE -eq 0) {
-  git switch host/113 2>$null
-  if ($LASTEXITCODE -ne 0) { git switch --track origin/host/113 }
+  git switch host/113/structure 2>$null
+  if ($LASTEXITCODE -ne 0) { git switch --track origin/host/113/structure }
 } else {
-  git switch -c host/113 --track origin/main
+  git switch -c host/113/structure --track origin/feature/nas-private-config
 }
 git pull --ff-only
 ```
@@ -132,7 +132,7 @@ Host Agent：心跳正常｜本机 Host ID｜只读服务已上报
 git status --short
 git add tray/BigQMTAccountTray.cs tray/BigQMT_native_tray_checksums.sha256 config/machine.local.example.json config/schemas/machine.local.schema.json docs/161_host_agent_embedded_account_tray_2026-09-18.md
 git commit -m "feat: embed readonly host agent in account tray"
-git push -u origin host/113
+git push -u origin host/113/structure
 ```
 
 完成后报告：分支、提交SHA、两个EXE哈希、Host Agent心跳结果和任何阻塞项。
