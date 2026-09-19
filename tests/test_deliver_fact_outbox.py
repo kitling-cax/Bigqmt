@@ -69,3 +69,23 @@ def test_delivery_transport_failure_keeps_pending(tmp_path, capsys):
     assert len(outbox.pending()) == 1
     assert outbox.pending()[0]["attempts"] == 1
     assert '"status": "RETRY_PENDING"' in capsys.readouterr().out
+
+
+def test_delivery_blocks_fact_secret_host_mismatch_before_network(tmp_path, capsys):
+    outbox = LocalOutbox(tmp_path / "outbox.sqlite3")
+    outbox.enqueue("STRATEGY_RUNTIME", {"event_id": "event-1", "account_id": "90000001", "strategy_id": "s", "state": "RUNNING"})
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps({"schema_version": 1, "hosts": [{
+        "host_id": "host-placeholder", "key_id": "key-1", "status": "ACTIVE",
+        "secret_b64": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+    }]}), encoding="utf-8")
+    rc = main([
+        "--profile", "simulation", "--secret-file", str(secret),
+        "--outbox-path", str(tmp_path / "outbox.sqlite3"),
+        "--expected-host-id", "host-real",
+        "--endpoint", "http://127.0.0.1:1/api/v1/facts/ingest",
+        "--allow-non-shadow",
+    ])
+    assert rc == 3
+    assert len(outbox.pending()) == 1
+    assert "FACT_HOST_ID_MISMATCH" in capsys.readouterr().out
