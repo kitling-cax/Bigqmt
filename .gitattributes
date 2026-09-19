@@ -9,3 +9,5 @@
 *.md text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
+# SHA-256 manifests must round-trip through sha256sum and git diff byte-for-byte.
+*.sha256 text eol=lf
