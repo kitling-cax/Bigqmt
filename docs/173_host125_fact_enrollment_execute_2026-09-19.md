@@ -14,6 +14,8 @@ git log -1 --oneline
 
 确认历史包含：
 
+本次注册工具修复；如果旧版本在注册时出现 `Permission denied`，先重新拉取分支再执行。
+
 ```text
 6ac742e feat: add secure shadow fact enrollment workflow
 ```
