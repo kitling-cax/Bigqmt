@@ -36,6 +36,10 @@ def test_list_installed_reports_each_build(tmp_path: Path):
     installed = uninstaller.list_installed(install_root)
     ids = {(item["strategy_id"], item["version"], item["build_id"]) for item in installed}
     assert ids == {("S10", "v1", "r1"), ("S10", "v1", "r2"), ("S11", "v2", "r1")}
+    for item in installed:
+        assert item["artifact_count"] == "1"
+        assert int(item["installed_at"]) > 0
+        assert (item["install_dir"]).endswith(item["build_id"])
 
 
 def test_uninstall_removes_only_targeted_build(tmp_path: Path):

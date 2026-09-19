@@ -961,7 +961,12 @@ internal static class BigQMTAccountTray
                 string sid = Convert.ToString(entryMap["strategy_id"]);
                 string ver = Convert.ToString(entryMap["version"]);
                 string bid = Convert.ToString(entryMap["build_id"]);
-                labels.Add(sid + "  |  " + ver + "  |  " + bid);
+                string installedAt = FormatInstalledAt(Convert.ToString(entryMap["installed_at"]));
+                string artifacts = Convert.ToString(entryMap["artifact_count"]);
+                if (artifacts.Length > 0) artifacts = artifacts + " 个产物";
+                else artifacts = "产物数未知";
+                string label = sid + "  |  " + ver + "  |  " + bid + "  |  " + installedAt + "  |  " + artifacts;
+                labels.Add(label);
                 selections.Add(sid + "|" + ver + "|" + bid);
             }
             using (UninstallSelectionForm form = new UninstallSelectionForm(labels))
@@ -971,17 +976,28 @@ internal static class BigQMTAccountTray
                 selections.Clear();
                 foreach (string label in picked)
                 {
-                    int sep1 = label.IndexOf("  |  "); if (sep1 < 0) continue;
-                    int sep2 = label.IndexOf("  |  ", sep1 + 5); if (sep2 < 0) continue;
-                    string sid = label.Substring(0, sep1);
-                    string ver = label.Substring(sep1 + 5, sep2 - sep1 - 5);
-                    string bid = label.Substring(sep2 + 5);
-                    selections.Add(sid + "|" + ver + "|" + bid);
+                    // Label format: sid  |  ver  |  bid  |  installed_at  |  artifacts
+                    // Split on the 5-field separator; take the first 3.
+                    string[] parts = label.Split(new string[] { "  |  " }, StringSplitOptions.None);
+                    if (parts.Length < 3) continue;
+                    selections.Add(parts[0] + "|" + parts[1] + "|" + parts[2]);
                 }
                 return true;
             }
         }
         catch { return false; }
+    }
+
+    private static string FormatInstalledAt(string unixSeconds)
+    {
+        long seconds;
+        if (!long.TryParse(unixSeconds, out seconds) || seconds <= 0) return "安装时间未知";
+        try
+        {
+            DateTime local = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(seconds).ToLocalTime();
+            return local.ToString("yyyy-MM-dd HH:mm");
+        }
+        catch { return "安装时间未知"; }
     }
 
     private static string Sha256Hex(string text)
@@ -1393,45 +1409,56 @@ internal static class BigQMTAccountTray
     private sealed class UninstallSelectionForm : Form
     {
         private readonly CheckedListBox list;
+        private readonly Label counter;
         public UninstallSelectionForm(System.Collections.Generic.IList<string> labels)
         {
-            Text = "选择要删除的已安装策略";
+            Text = "选择要删除的已安装策略（共 " + labels.Count + " 条）";
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             MinimizeBox = false; ShowInTaskbar = false;
-            ClientSize = new Size(520, 320);
+            ClientSize = new Size(720, 360);
             Label hint = new Label();
-            hint.Text = "勾选要删除的条目（每个条目 = strategy_id / version / build_id）：";
+            hint.Text = "勾选要删除的条目（每行：strategy_id  |  version  |  build_id  |  安装时间  |  产物数）：";
             hint.AutoSize = true;
             hint.Location = new Point(12, 8);
             list = new CheckedListBox();
             list.Location = new Point(12, 32);
-            list.Size = new Size(496, 220);
+            list.Size = new Size(696, 240);
             list.CheckOnClick = true;
             list.IntegralHeight = false;
             foreach (string label in labels) list.Items.Add(label, false);
+            counter = new Label();
+            counter.AutoSize = true;
+            counter.Location = new Point(12, 280);
+            counter.Text = "已选 0 / " + labels.Count + " 条";
+            list.ItemCheck += delegate { counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
             Button all = new Button();
             all.Text = "全选";
-            all.Location = new Point(12, 260);
+            all.Location = new Point(12, 312);
             all.AutoSize = true;
-            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); };
+            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); counter.Text = "已选 " + list.Items.Count + " / " + labels.Count + " 条"; };
             Button none = new Button();
             none.Text = "全不选";
-            none.Location = new Point(80, 260);
+            none.Location = new Point(80, 312);
             none.AutoSize = true;
-            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); };
+            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); counter.Text = "已选 0 / " + labels.Count + " 条"; };
+            Button invert = new Button();
+            invert.Text = "反选";
+            invert.Location = new Point(160, 312);
+            invert.AutoSize = true;
+            invert.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, !list.GetItemChecked(i)); counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
             Button ok = new Button();
             ok.Text = "删除选中";
-            ok.Location = new Point(310, 260);
+            ok.Location = new Point(480, 312);
             ok.AutoSize = true;
             ok.DialogResult = DialogResult.OK;
             Button cancel = new Button();
             cancel.Text = "取消";
-            cancel.Location = new Point(420, 260);
+            cancel.Location = new Point(620, 312);
             cancel.AutoSize = true;
             cancel.DialogResult = DialogResult.Cancel;
             AcceptButton = ok; CancelButton = cancel;
-            Controls.Add(hint); Controls.Add(list); Controls.Add(all); Controls.Add(none); Controls.Add(ok); Controls.Add(cancel);
+            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(all); Controls.Add(none); Controls.Add(invert); Controls.Add(ok); Controls.Add(cancel);
         }
         public System.Collections.Generic.List<string> SelectedLabels()
         {

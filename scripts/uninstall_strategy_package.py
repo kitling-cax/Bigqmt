@@ -58,11 +58,27 @@ def list_installed(install_root: Path | None = None) -> list[dict[str, str]]:
                 result_path = build_dir / "INSTALL_RESULT.json"
                 if not result_path.is_file():
                     continue
+                manifest_path = build_dir / "MANIFEST.json"
+                artifact_count = 0
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    artifacts = manifest.get("artifacts")
+                    if isinstance(artifacts, list):
+                        artifact_count = len(artifacts)
+                except (OSError, ValueError):
+                    pass
+                installed_at = ""
+                try:
+                    installed_at = result_path.stat().st_mtime
+                except OSError:
+                    pass
                 out.append({
                     "strategy_id": strategy_dir.name,
                     "version": version_dir.name,
                     "build_id": build_dir.name,
                     "install_dir": str(build_dir),
+                    "installed_at": str(int(installed_at)) if installed_at else "",
+                    "artifact_count": str(artifact_count),
                 })
     return out
 
