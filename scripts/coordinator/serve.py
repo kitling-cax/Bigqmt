@@ -26,7 +26,9 @@ from kitling_bigqmt.coordinator_instance import (  # noqa: E402
 )
 from kitling_bigqmt.host_fact_identity import trusted_hosts_from_file  # noqa: E402
 from kitling_bigqmt.coordinator_fact_ingress import CoordinatorFactIngress  # noqa: E402
-from kitling_bigqmt.strategy_catalog import catalog_html, list_candidates, preview_push  # noqa: E402
+from kitling_bigqmt.strategy_catalog import list_candidates, preview_push  # noqa: E402
+from kitling_bigqmt.strategy_catalog_page import catalog_html  # noqa: E402
+from kitling_bigqmt.strategy_deployment import StrategyDeploymentStore  # noqa: E402
 
 HOST = os.environ.get("BIGQMT_COORDINATOR_BIND", "127.0.0.1")
 PORT = int(os.environ.get("BIGQMT_COORDINATOR_PORT", "18443"))
@@ -51,6 +53,49 @@ def coordinator_store() -> CoordinatorStore:
     if os.name == "nt":
         default = str(ROOT / "runtime_data" / "coordinator" / "coordinator.sqlite3")
     return CoordinatorStore(os.environ.get("BIGQMT_COORDINATOR_DB", default))
+
+
+def strategy_deployment_store() -> StrategyDeploymentStore:
+    return StrategyDeploymentStore(os.environ.get("BIGQMT_COORDINATOR_DB", "/var/lib/kitling-bigqmt-coordinator/coordinator.sqlite3"))
+
+
+def strategy_install_requests(payload: dict) -> tuple[int, dict]:
+    """Create pull-based install requests; never creates an execution lease."""
+    if not isinstance(payload, dict):
+        return 400, {"status": "rejected", "reason": "request must be an object"}
+    strategy_id = str(payload.get("strategy_id", ""))
+    version = str(payload.get("version", ""))
+    build_id = str(payload.get("build_id", ""))
+    requested_by = str(payload.get("requested_by") or "dashboard")
+    targets = payload.get("target_host_ids")
+    if not isinstance(targets, list) or not targets:
+        return 400, {"status": "rejected", "reason": "target_host_ids is required"}
+    candidates = list_candidates(ROOT).get("candidates", [])
+    candidate = next((item for item in candidates if item.get("strategy_id") == strategy_id
+                      and item.get("version") == version and item.get("build_id") == build_id), None)
+    if not candidate or candidate.get("status") != "READY":
+        return 400, {"status": "rejected", "reason": "strategy candidate is not READY",
+                      "orders_enabled": False}
+    live_ids = {str(host.get("host_id")) for host in _live_hosts_snapshot() if host.get("host_id")}
+    store = strategy_deployment_store()
+    deployments = []
+    for host_id in dict.fromkeys(str(value).strip() for value in targets):
+        if not host_id:
+            return 400, {"status": "rejected", "reason": "target host id is empty", "orders_enabled": False}
+        if host_id not in live_ids:
+            return 409, {"status": "rejected", "reason": "target host is not connected",
+                         "target_host_id": host_id, "orders_enabled": False}
+        deployments.append(store.request_install(
+            strategy_id=strategy_id, version=version, build_id=build_id,
+            manifest_sha256=str(candidate.get("manifest_sha256") or ""),
+            package_path=str(candidate.get("package_path") or ""),
+            target_host_id=host_id, requested_by=requested_by,
+        ))
+    return 202, {
+        "status": "INSTALL_REQUESTED", "readonly": False, "orders_enabled": False,
+        "install_started": False, "run_after_install": False, "deployments": deployments,
+        "control": "HOST_AGENT_PULLS_AND_VERIFIES_NO_AUTO_START",
+    }
 
 
 def fact_ingress_from_environment() -> CoordinatorFactIngress | None:
@@ -329,6 +374,8 @@ def response_payload(path: str) -> tuple[int, dict]:
         }
     if path == "/api/v1/strategy-candidates":
         return 200, list_candidates(ROOT)
+    if path == "/api/v1/strategy-deployments":
+        return 400, {"status": "rejected", "reason": "host_id query is required", "orders_enabled": False}
     if path == "/api/v1/executor-preview":
         return 200, executor_preview()
     if path == "/api/v1/fleet":
@@ -379,7 +426,17 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
-        if path == "/api/v1/host-agent/intents":
+        if path == "/api/v1/strategy-deployments":
+            query = parse_qs(split.query, keep_blank_values=True)
+            host_id = str(query.get("host_id", [""])[0]).strip()
+            body = {
+                "status": "ok", "readonly": True, "orders_enabled": False,
+                "host_id": host_id,
+                "deployments": strategy_deployment_store().pending_for_host(host_id),
+                "control": "HOST_AGENT_PULL_ONLY_NO_EXECUTION_LEASE",
+            }
+            code = 200 if host_id else 400
+        elif path == "/api/v1/host-agent/intents":
             query = parse_qs(split.query, keep_blank_values=True)
             code, body = host_agent_intent_preview(
                 str(query.get("account_id", [""])[0]), str(query.get("host_id", [""])[0])
@@ -394,6 +451,47 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_POST(self) -> None:  # noqa: N802
+        post_path = urlsplit(self.path).path
+        if post_path == "/api/v1/strategy-install-request":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 64 * 1024:
+                    raise ValueError("invalid install request size")
+                payload = json.loads(self.rfile.read(length))
+                code, body = strategy_install_requests(payload)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                code, body = 400, {"status": "rejected", "reason": str(exc),
+                                   "readonly": False, "orders_enabled": False}
+            encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
+        if post_path.startswith("/api/v1/strategy-deployments/") and post_path.endswith("/status"):
+            deployment_id = post_path[len("/api/v1/strategy-deployments/"):-len("/status")].strip("/")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 64 * 1024:
+                    raise ValueError("invalid deployment status size")
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError("deployment status must be an object")
+                body = strategy_deployment_store().update_status(
+                    deployment_id, str(payload.get("host_id") or ""),
+                    str(payload.get("status") or ""), payload.get("result") if isinstance(payload.get("result"), dict) else {},
+                )
+                code = 200
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                code, body = 400, {"status": "rejected", "reason": str(exc), "orders_enabled": False}
+            encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         if urlsplit(self.path).path == "/api/v1/strategy-push-preview":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
