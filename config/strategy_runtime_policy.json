@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "simulation": {
-    "v1_1_15_auto_run_enabled": true,
+    "v1_1_15_auto_run_enabled": false,
     "v1_1_15_preflight_only_dates": [],
-    "policy_note": "Native tray master switch; it does not itself submit an order."
+    "policy_note": "Per-strategy local run switches; none of them submits an order.",
+    "strategies": {}
   },
   "production": {
     "strategy_recovery_enabled": false,
