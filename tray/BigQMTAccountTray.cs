@@ -1545,7 +1545,17 @@ internal static class BigQMTAccountTray
             counter.AutoSize = true;
             counter.Location = new Point(12, 348);
             counter.Text = "已选 " + labels.Count + " / " + labels.Count + " 条（全勾）";
-            list.ItemCheck += delegate { UpdateState(); };
+            // ItemCheck fires BEFORE the state changes; use e.NewValue to know
+            // the post-change count without subscribing to a non-existent
+            // ItemChecked event.
+            list.ItemCheck += delegate(object sender, ItemCheckEventArgs args)
+            {
+                int future = list.CheckedItems.Count;
+                if (args.NewValue == CheckState.Checked) future++;
+                else future--;
+                counter.Text = "已选 " + future + " / " + list.Items.Count + " 条";
+                warning.Text = future == 0 ? "⚠ 未勾选任何条目。点方框或点文字切换勾选，然后点「删除选中」。" : "";
+            };
             warning = new Label();
             warning.AutoSize = true;
             warning.Location = new Point(12, 372);
