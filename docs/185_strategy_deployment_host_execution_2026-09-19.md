@@ -19,6 +19,9 @@
 该修复增加本机跨进程锁，避免模拟/正式托盘同时安装同一个策略包导致
 `WinError 5`。第二个托盘会显示“其他托盘正在拉取”，不会重复安装或改变订单权限。
 
+同时包含 `b058981 fix: allow failed strategy installs to retry`：旧的 FAILED 请求
+再次点击页面按钮时会重新进入 REQUESTED，不会被旧幂等记录永久挡住。
+
 ## Claude 执行步骤（两台机器分别执行）
 
 ```powershell
