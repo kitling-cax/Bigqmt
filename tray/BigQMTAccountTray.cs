@@ -867,8 +867,7 @@ internal static class BigQMTAccountTray
             Audit("strategy_uninstall_cancelled", "user_cancelled");
             return;
         }
-        string attemptHash = Sha256Hex(password);
-        if (attemptHash != expectedHash)
+        if (Sha256Hex(password) != expectedHash)
         {
             MessageBox.Show("密码错误。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             Audit("strategy_uninstall_blocked", "bad_password");
@@ -882,47 +881,74 @@ internal static class BigQMTAccountTray
             Audit("strategy_uninstall_list_error", listed);
             return;
         }
-        System.Collections.Generic.List<string> selections = new System.Collections.Generic.List<string>();
-        string installRoot = "";
-        if (!PromptStrategySelection(listed, out installRoot, selections))
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> entries = ParseInstalledEntries(listed);
+        if (entries.Count == 0)
         {
-            Audit("strategy_uninstall_cancelled", "no_selection");
+            MessageBox.Show("本机没有已安装策略。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Audit("strategy_uninstall_cancelled", "no_installs");
             return;
         }
-        if (selections.Count == 0)
+        System.Text.StringBuilder preview = new System.Text.StringBuilder();
+        foreach (var entry in entries)
         {
-            // The form's own gating (button disabled, ContinueIfAnyChecked
-            // refusing to close on 0 rows) is the primary defence.  This is
-            // a silent fallback for any edge case (Enter on AcceptButton,
-            // double-click race, etc.) where the form still ends up closing
-            // with no rows checked.  Do not show another popup; just audit.
-            Audit("strategy_uninstall_cancelled", "empty_selection");
-            return;
+            preview.Append("  • ").Append(entry["strategy_id"]).Append("  ").Append(entry["version"]).Append("  ").Append(entry["build_id"]).Append("\n");
         }
-        if (MessageBox.Show("将永久删除本机以下已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" + string.Join("\n", selections.ToArray()) + "\n\n确认继续？", ProfileTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+        if (MessageBox.Show(
+            "将永久删除本机以下 " + entries.Count + " 个已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" +
+            preview.ToString() +
+            "\n确认继续？",
+            ProfileTitle,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning) != DialogResult.Yes)
         {
             Audit("strategy_uninstall_cancelled", "user_declined_confirmation");
             return;
         }
 
         int removed = 0; int missing = 0; System.Text.StringBuilder errors = new System.Text.StringBuilder();
-        foreach (string item in selections)
+        foreach (var entry in entries)
         {
-            string[] parts = item.Split('|');
-            if (parts.Length != 3) continue;
-            string args = "--strategy-id \"" + parts[0] + "\" --version \"" + parts[1] + "\" --build-id \"" + parts[2] + "\" --install-root \"" + installRoot + "\"";
+            string args = "--strategy-id \"" + entry["strategy_id"] + "\" --version \"" + entry["version"] + "\" --build-id \"" + entry["build_id"] + "\"";
             bool itemOk; string output = RunPython("uninstall_strategy_package.py", args, 30000, out itemOk);
-            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0) { removed++; Audit("strategy_uninstalled", item + "; orders_enabled=false; run_after_install=false"); }
-            else if (output.IndexOf("\"status\": \"not_found\"") >= 0) { missing++; Audit("strategy_uninstall_missing", item); }
+            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0) { removed++; Audit("strategy_uninstalled", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"] + "; orders_enabled=false; run_after_install=false"); }
+            else if (output.IndexOf("\"status\": \"not_found\"") >= 0) { missing++; Audit("strategy_uninstall_missing", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"]); }
             else
             {
-                errors.Append(item).Append(" → ").Append(output).Append("\n");
-                Audit("strategy_uninstall_error", item + ": " + output);
+                errors.Append(entry["strategy_id"]).Append(" → ").Append(output).Append("\n");
+                Audit("strategy_uninstall_error", entry["strategy_id"] + ": " + output);
             }
         }
         string summary = "删除完成：成功 " + removed + " 条" + (missing > 0 ? "，目标已不存在 " + missing + " 条" : "") + (errors.Length > 0 ? "，失败 " + errors.Length + " 条" : "");
         MessageBox.Show(summary + (errors.Length > 0 ? "\n\n失败详情：\n" + errors.ToString() : ""), ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
         if (removed > 0 || missing > 0) RefreshLocalInstallMenuState();
+    }
+
+    private static System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> ParseInstalledEntries(string listJson)
+    {
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> result =
+            new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>>();
+        int arrayStart = listJson.IndexOf("\"installed\":", StringComparison.Ordinal);
+        if (arrayStart < 0) return result;
+        int arrayOpen = listJson.IndexOf('[', arrayStart);
+        if (arrayOpen < 0) return result;
+        int cursor = arrayOpen + 1;
+        while (cursor < listJson.Length)
+        {
+            int objStart = listJson.IndexOf('{', cursor);
+            if (objStart < 0) break;
+            int objEnd = MatchClosingBrace(listJson, objStart);
+            if (objEnd < 0) break;
+            string entry = listJson.Substring(objStart, objEnd - objStart + 1);
+            var map = new System.Collections.Generic.Dictionary<string, string>();
+            foreach (string key in new[] { "strategy_id", "version", "build_id" })
+            {
+                map[key] = ExtractJsonString(entry, key);
+            }
+            if (map["strategy_id"].Length > 0 && map["version"].Length > 0 && map["build_id"].Length > 0)
+                result.Add(map);
+            cursor = objEnd + 1;
+        }
+        return result;
     }
 
     private static void RefreshLocalInstallMenuState()
@@ -948,67 +974,6 @@ internal static class BigQMTAccountTray
         using (PasswordPromptForm form = new PasswordPromptForm(title, label))
         {
             return form.ShowDialog() == DialogResult.OK && form.EnteredPassword(out password);
-        }
-    }
-
-    private static bool PromptStrategySelection(string listJson, out string installRoot, System.Collections.Generic.List<string> selections)
-    {
-        installRoot = ExtractJsonString(listJson, "install_root");
-        selections = new System.Collections.Generic.List<string>();
-        try
-        {
-            // Robust against JavaScriptSerializer quirks on nested arrays: scan
-            // for every '{...}' object after the 'installed' key and pull
-            // strategy_id / version / build_id / installed_at / artifact_count
-            // out of each object with direct string searches.
-            int arrayStart = listJson.IndexOf("\"installed\":", StringComparison.Ordinal);
-            if (arrayStart < 0) return true;
-            int arrayOpen = listJson.IndexOf('[', arrayStart);
-            if (arrayOpen < 0) return true;
-            System.Collections.Generic.List<string> labels = new System.Collections.Generic.List<string>();
-            int cursor = arrayOpen + 1;
-            while (cursor < listJson.Length)
-            {
-                int objStart = listJson.IndexOf('{', cursor);
-                if (objStart < 0) break;
-                int objEnd = MatchClosingBrace(listJson, objStart);
-                if (objEnd < 0) break;
-                string entry = listJson.Substring(objStart, objEnd - objStart + 1);
-                string sid = ExtractJsonString(entry, "strategy_id");
-                string ver = ExtractJsonString(entry, "version");
-                string bid = ExtractJsonString(entry, "build_id");
-                if (sid.Length == 0 || ver.Length == 0 || bid.Length == 0)
-                {
-                    cursor = objEnd + 1; continue;
-                }
-                string installedAt = FormatInstalledAt(ExtractJsonString(entry, "installed_at"));
-                string artifacts = ExtractJsonString(entry, "artifact_count");
-                if (artifacts.Length > 0) artifacts = artifacts + " 个产物";
-                else artifacts = "产物数未知";
-                string label = sid + "  |  " + ver + "  |  " + bid + "  |  " + installedAt + "  |  " + artifacts;
-                labels.Add(label);
-                selections.Add(sid + "|" + ver + "|" + bid);
-                cursor = objEnd + 1;
-            }
-            if (labels.Count == 0) return true;
-            using (UninstallSelectionForm form = new UninstallSelectionForm(labels))
-            {
-                if (form.ShowDialog() != DialogResult.OK) return false;
-                System.Collections.Generic.List<string> picked = form.SelectedLabels();
-                selections.Clear();
-                foreach (string label in picked)
-                {
-                    string[] parts = label.Split(new string[] { "  |  " }, StringSplitOptions.None);
-                    if (parts.Length < 3) continue;
-                    selections.Add(parts[0] + "|" + parts[1] + "|" + parts[2]);
-                }
-                return true;
-            }
-        }
-        catch (Exception error)
-        {
-            Audit("strategy_uninstall_list_parse_error", error.GetType().Name + ": " + error.Message);
-            return false;
         }
     }
 
@@ -1099,18 +1064,6 @@ internal static class BigQMTAccountTray
             else builder.Append(ch);
         }
         return builder.ToString();
-    }
-
-    private static string FormatInstalledAt(string unixSeconds)
-    {
-        long seconds;
-        if (!long.TryParse(unixSeconds, out seconds) || seconds <= 0) return "安装时间未知";
-        try
-        {
-            DateTime local = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(seconds).ToLocalTime();
-            return local.ToString("yyyy-MM-dd HH:mm");
-        }
-        catch { return "安装时间未知"; }
     }
 
     private static string Sha256Hex(string text)
@@ -1516,119 +1469,6 @@ internal static class BigQMTAccountTray
         {
             password = input.Text ?? "";
             return password.Length > 0;
-        }
-    }
-
-    private sealed class UninstallSelectionForm : Form
-    {
-        private readonly CheckedListBox list;
-        private readonly Label counter;
-        private readonly Label warning;
-        private readonly Button ok;
-        public UninstallSelectionForm(System.Collections.Generic.IList<string> labels)
-        {
-            Text = "选择要删除的已安装策略（共 " + labels.Count + " 条，默认全勾）";
-            FormBorderStyle = FormBorderStyle.Sizable;
-            StartPosition = FormStartPosition.CenterScreen;
-            MinimizeBox = false; ShowInTaskbar = false;
-            ClientSize = new Size(780, 420);
-            Label hint = new Label();
-            hint.Text = "每行最前面的方框 [X] 表示已勾选，[ ] 表示未勾选。\n" +
-                        "点方框或点文字都会切换状态。要删除谁就保持谁勾选。\n" +
-                        "默认全勾；想保留谁就点一下取消它的勾。";
-            hint.AutoSize = true;
-            hint.Location = new Point(12, 8);
-            list = new CheckedListBox();
-            list.Location = new Point(12, 60);
-            list.Size = new Size(756, 280);
-            list.CheckOnClick = true;
-            list.IntegralHeight = false;
-            list.Font = new System.Drawing.Font("Consolas", 10F);
-            foreach (string label in labels) list.Items.Add("[X] " + label, true);
-            counter = new Label();
-            counter.AutoSize = true;
-            counter.Location = new Point(12, 348);
-            counter.Text = "已选 " + labels.Count + " / " + labels.Count + " 条（全勾）";
-            // ItemCheck fires BEFORE the state changes; use e.NewValue to know
-            // the post-change count without subscribing to a non-existent
-            // ItemChecked event.
-            list.ItemCheck += delegate(object sender, ItemCheckEventArgs args)
-            {
-                int future = list.CheckedItems.Count;
-                if (args.NewValue == CheckState.Checked) future++;
-                else future--;
-                counter.Text = "已选 " + future + " / " + list.Items.Count + " 条";
-                warning.Text = future == 0 ? "⚠ 未勾选任何条目。点方框或点文字切换勾选，然后点「删除选中」。" : "";
-            };
-            warning = new Label();
-            warning.AutoSize = true;
-            warning.Location = new Point(12, 372);
-            warning.ForeColor = Color.FromArgb(170, 30, 30);
-            warning.Text = "";
-            Button all = new Button();
-            all.Text = "全选";
-            all.Location = new Point(12, 372);
-            all.AutoSize = true;
-            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); UpdateState(); };
-            Button none = new Button();
-            none.Text = "全不选";
-            none.Location = new Point(80, 372);
-            none.AutoSize = true;
-            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); UpdateState(); };
-            Button invert = new Button();
-            invert.Text = "反选";
-            invert.Location = new Point(160, 372);
-            invert.AutoSize = true;
-            invert.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, !list.GetItemChecked(i)); UpdateState(); };
-            ok = new Button();
-            ok.Text = "删除选中";
-            ok.Location = new Point(540, 372);
-            ok.AutoSize = true;
-            // DialogResult deliberately left as None so the form does not
-            // auto-close on click.  ContinueIfAnyChecked is the sole gate.
-            ok.DialogResult = DialogResult.None;
-            ok.Click += ContinueIfAnyChecked;
-            Button cancel = new Button();
-            cancel.Text = "取消";
-            cancel.Location = new Point(680, 372);
-            cancel.AutoSize = true;
-            cancel.DialogResult = DialogResult.Cancel;
-            AcceptButton = ok; CancelButton = cancel;
-            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(warning); Controls.Add(all); Controls.Add(none); Controls.Add(invert); Controls.Add(ok); Controls.Add(cancel);
-            UpdateState();
-        }
-
-        private void UpdateState()
-        {
-            int checkedCount = list.CheckedItems.Count;
-            counter.Text = "已选 " + checkedCount + " / " + list.Items.Count + " 条";
-            warning.Text = checkedCount == 0 ? "⚠ 未勾选任何条目。点方框或点文字切换勾选，然后点「删除选中」。" : "";
-            ok.Enabled = checkedCount > 0;
-        }
-
-        private void ContinueIfAnyChecked(object sender, EventArgs e)
-        {
-            if (list.CheckedItems.Count == 0)
-            {
-                // Defence in depth: button is also disabled in UpdateState.
-                UpdateState();
-                return;
-            }
-            DialogResult = DialogResult.OK;
-            Close();
-        }
-
-        public System.Collections.Generic.List<string> SelectedLabels()
-        {
-            System.Collections.Generic.List<string> picked = new System.Collections.Generic.List<string>();
-            foreach (object item in list.CheckedItems)
-            {
-                string raw = item as string;
-                if (raw == null) continue;
-                if (raw.StartsWith("[X] ") || raw.StartsWith("[ ] ")) raw = raw.Substring(4);
-                picked.Add(raw);
-            }
-            return picked;
         }
     }
 }
