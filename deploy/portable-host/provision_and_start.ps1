@@ -42,7 +42,7 @@ if (-not (Test-Path -LiteralPath $auditPath)) {
 $collect = @('--profile',[string]$cfg.profile,'--host-id',[string]$cfg.host_id,'--audit-path',$auditPath,'--outbox-path',$outboxPath)
 & py -3.12 (Join-Path $Root 'scripts\host_agent\collect_runtime_fact.py') @collect
 if ($LASTEXITCODE -ne 0) { throw 'local fact collection failed' }
-$deliver = @('--profile',[string]$cfg.profile,'--secret-file',$secretPath,'--outbox-path',$outboxPath,'--endpoint',[string]$cfg.coordinator_endpoint)
+$deliver = @('--profile',[string]$cfg.profile,'--secret-file',$secretPath,'--outbox-path',$outboxPath,'--expected-host-id',[string]$cfg.host_id,'--endpoint',[string]$cfg.coordinator_endpoint)
 & py -3.12 (Join-Path $Root 'scripts\host_agent\deliver_fact_outbox.py') @deliver
 $deliveryExit = $LASTEXITCODE
 Start-Process -FilePath (Join-Path $Root 'BigQMT_HostTray.exe') -WorkingDirectory $Root
