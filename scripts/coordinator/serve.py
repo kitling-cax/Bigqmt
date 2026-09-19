@@ -9,6 +9,8 @@ import json
 import os
 import sys
 import threading
+import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +33,10 @@ COORDINATOR_MODE = os.environ.get("BIGQMT_COORDINATOR_MODE", "READONLY_FOUNDATIO
 COORDINATOR_INSTANCE_ID = os.environ.get("BIGQMT_COORDINATOR_INSTANCE_ID", "UNINITIALIZED")
 HOSTS: dict[str, dict] = {}
 HOSTS_LOCK = threading.Lock()
+try:
+    PROFILE_TTL_SECONDS = max(1, int(os.environ.get("BIGQMT_PROFILE_TTL_SECONDS", "120")))
+except ValueError:
+    PROFILE_TTL_SECONDS = 120
 ACCOUNT_POLICY = {
     "90000001": {"mode": "SIMULATION", "execution_eligible": True},
     "90000002": {"mode": "PRODUCTION_READ_ONLY", "execution_eligible": False},
@@ -66,12 +72,79 @@ def fact_ingress_from_environment() -> CoordinatorFactIngress | None:
     return CoordinatorFactIngress(coordinator_store().database_path, trusted)
 
 
-def _heartbeat_age_seconds(sent_at: object) -> int | None:
+def _heartbeat_age_seconds(sent_at: object, now: datetime | None = None) -> int | None:
     try:
         value = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
-        return max(0, int((datetime.now(timezone.utc) - value).total_seconds()))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return max(0, int(((now or datetime.now(timezone.utc)) - value).total_seconds()))
     except (TypeError, ValueError):
         return None
+
+
+def _prune_stale_profiles_locked(now: datetime | None = None) -> int:
+    """Remove stale/invalid account profiles and rebuild host account indexes.
+
+    The in-memory registry is deliberately ephemeral.  A profile is live only
+    while its own sanitized heartbeat remains within ``PROFILE_TTL_SECONDS``.
+    This prevents an old host/account identity from becoming an execution
+    candidate after a tray is moved, renamed, or stopped.  Transaction data,
+    Redis state, and the durable lease database are not touched here.
+
+    ``HOSTS_LOCK`` must be held by the caller.
+    """
+    current = now or datetime.now(timezone.utc)
+    removed = 0
+    for host_id, host in list(HOSTS.items()):
+        raw_profiles = host.get("profiles", {})
+        if not isinstance(raw_profiles, dict):
+            removed += 1
+            HOSTS.pop(host_id, None)
+            continue
+        live_profiles: dict[str, dict] = {}
+        for account_id, report in raw_profiles.items():
+            if not isinstance(report, dict):
+                removed += 1
+                continue
+            age = _heartbeat_age_seconds(report.get("sent_at"), current)
+            if age is None or age > PROFILE_TTL_SECONDS:
+                removed += 1
+                continue
+            live_profiles[str(account_id)] = report
+        if not live_profiles:
+            # A host with no live account profile is not useful to the fleet
+            # view and must not remain an apparent executor candidate.
+            HOSTS.pop(host_id, None)
+            continue
+        host["profiles"] = live_profiles
+        host["accounts"] = sorted(
+            account_id for account_id in live_profiles if account_id != "unbound"
+        )
+        # Keep the host-level timestamp coherent with the newest surviving
+        # profile, even when an older second tray was pruned.
+        timestamps = [
+            report.get("sent_at") for report in live_profiles.values()
+            if _heartbeat_age_seconds(report.get("sent_at"), current) is not None
+        ]
+        if timestamps:
+            host["sent_at"] = max(timestamps)
+    return removed
+
+
+def _live_hosts_snapshot() -> list[dict]:
+    """Return a pruned, detached fleet snapshot for every read endpoint."""
+    with HOSTS_LOCK:
+        _prune_stale_profiles_locked()
+        return deepcopy(list(HOSTS.values()))
+
+
+def _profile_reaper() -> None:
+    """Continuously age out profiles even when no dashboard request arrives."""
+    interval = max(1, min(30, PROFILE_TTL_SECONDS // 2 or 1))
+    while True:
+        time.sleep(interval)
+        with HOSTS_LOCK:
+            _prune_stale_profiles_locked()
 
 
 DEFAULT_PROGRAM_PHASE = "M01_M04_READONLY_FLEET_IMPLEMENTATION_IN_PROGRESS"
@@ -130,8 +203,7 @@ def load_progress() -> dict:
 
 def executor_preview() -> dict:
     """Project candidates only; no lease is written in the bootstrap service."""
-    with HOSTS_LOCK:
-        hosts = list(HOSTS.values())
+    hosts = _live_hosts_snapshot()
     store = coordinator_store()
     entries = []
     for account_id, policy in ACCOUNT_POLICY.items():
@@ -169,7 +241,12 @@ def executor_preview() -> dict:
             "candidates": candidates,
             "control": "PREVIEW_ONLY_NO_LEASE_WRITE",
         })
-    return {"status": "ok", "mode": "readonly-preview", "accounts": entries}
+    return {
+        "status": "ok",
+        "mode": "readonly-preview",
+        "profile_ttl_seconds": PROFILE_TTL_SECONDS,
+        "accounts": entries,
+    }
 
 
 def host_agent_intent_preview(account_id: str, host_id: str) -> tuple[int, dict]:
@@ -195,8 +272,7 @@ def host_agent_intent_preview(account_id: str, host_id: str) -> tuple[int, dict]
 
 def host_agent_intent_preview_status() -> dict:
     """Aggregate only the visible empty-preview state for the monitor page."""
-    with HOSTS_LOCK:
-        hosts = list(HOSTS.values())
+    hosts = _live_hosts_snapshot()
     targets = []
     for host in hosts:
         for account_id in sorted(dict(host.get("profiles", {}))):
@@ -209,7 +285,8 @@ def host_agent_intent_preview_status() -> dict:
             })
     return {
         "status": "ok", "mode": "readonly-intent-preview-status", "readonly": True,
-        "orders_enabled": False, "targets": targets,
+        "orders_enabled": False, "profile_ttl_seconds": PROFILE_TTL_SECONDS,
+        "targets": targets,
         "control": "EMPTY_PREVIEW_NO_INTENT_READ_OR_EXECUTION",
     }
 
@@ -252,13 +329,15 @@ def response_payload(path: str) -> tuple[int, dict]:
     if path == "/api/v1/executor-preview":
         return 200, executor_preview()
     if path == "/api/v1/fleet":
+        hosts = _live_hosts_snapshot()
         return 200, {
             "status": "ok",
             "mode": "readonly-fleet",
             "readonly": True,
             "orders_enabled": False,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "hosts": list(HOSTS.values()),
+            "profile_ttl_seconds": PROFILE_TTL_SECONDS,
+            "hosts": hosts,
             "executor_preview": executor_preview(),
             "intent_preview": host_agent_intent_preview_status(),
             "progress": load_progress(),
@@ -267,8 +346,11 @@ def response_payload(path: str) -> tuple[int, dict]:
     if path == "/api/v1/host-agent/intent-preview-status":
         return 200, host_agent_intent_preview_status()
     if path == "/api/v1/hosts":
-        with HOSTS_LOCK:
-            return 200, {"status": "ok", "hosts": list(HOSTS.values())}
+        return 200, {
+            "status": "ok",
+            "profile_ttl_seconds": PROFILE_TTL_SECONDS,
+            "hosts": _live_hosts_snapshot(),
+        }
     return 404, {"status": "not_found"}
 
 
@@ -350,6 +432,7 @@ class Handler(BaseHTTPRequestHandler):
             # tray overwrite the first one in the host registry.
             profile_key = account_ids[0] if account_ids else "unbound"
             with HOSTS_LOCK:
+                _prune_stale_profiles_locked()
                 previous = HOSTS.get(payload["host_id"], {})
                 profiles = dict(previous.get("profiles", {}))
                 profiles[profile_key] = {
@@ -357,7 +440,9 @@ class Handler(BaseHTTPRequestHandler):
                     "services": payload.get("services", {}),
                     "agent_version": payload.get("agent_version", ""),
                 }
-                all_accounts = sorted(set(previous.get("accounts", [])) | set(account_ids))
+                all_accounts = sorted(
+                    account_id for account_id in profiles if account_id != "unbound"
+                )
                 record = {
                     "host_id": payload["host_id"],
                     "state": payload["state"],
@@ -393,6 +478,7 @@ def main() -> None:
             f"BigQMT Coordinator mode={COORDINATOR_MODE} instance={identity.instance_id} listening on {HOST}:{PORT}",
             flush=True,
         )
+        threading.Thread(target=_profile_reaper, name="profile-reaper", daemon=True).start()
         ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

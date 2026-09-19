@@ -17,7 +17,7 @@ def test_readonly_bootstrap_accepts_heartbeat_and_lists_host():
     try:
         conn = HTTPConnection(*server.server_address)
         body = {"schema_version": 1, "host_id": "host-105", "state": "HEALTHY_READONLY",
-                "sent_at": "2026-09-14T08:00:00+00:00", "services": {"qmt": "UP"}, "accounts": ["90000001"]}
+                "sent_at": "2999-09-14T08:00:00+00:00", "services": {"qmt": "UP"}, "accounts": ["90000001"]}
         conn.request("POST", "/api/v1/hosts/heartbeat", json.dumps(body), {"Content-Type": "application/json"})
         assert conn.getresponse().status == 202
         conn.request("GET", "/api/v1/hosts")
@@ -101,7 +101,10 @@ def test_host_agent_intent_preview_is_empty_readonly_get_only():
 
 def test_intent_preview_status_is_aggregate_readonly_and_never_exposes_intents():
     HOSTS.clear()
-    HOSTS["host-105"] = {"host_id": "host-105", "profiles": {"90000001": {}, "90000002": {}}}
+    HOSTS["host-105"] = {"host_id": "host-105", "profiles": {
+        "90000001": {"sent_at": "2999-01-01T00:00:00+00:00"},
+        "90000002": {"sent_at": "2999-01-01T00:00:00+00:00"},
+    }}
     code, payload = serve.response_payload("/api/v1/host-agent/intent-preview-status")
     assert code == 200
     assert payload["readonly"] is True
@@ -110,6 +113,35 @@ def test_intent_preview_status_is_aggregate_readonly_and_never_exposes_intents()
         ("host-105", "90000001", 0), ("host-105", "90000002", 0)
     ]
     assert "intents" not in payload
+
+
+def test_stale_profiles_are_removed_from_hosts_and_executor_preview(monkeypatch):
+    HOSTS.clear()
+    monkeypatch.setattr(serve, "PROFILE_TTL_SECONDS", 120)
+    HOSTS["host-105"] = {"host_id": "host-105", "profiles": {
+        "90000001": {"sent_at": "2020-01-01T00:00:00+00:00", "services": {}},
+        "90000002": {"sent_at": "2999-01-01T00:00:00+00:00", "services": {}},
+    }}
+
+    code, payload = serve.response_payload("/api/v1/hosts")
+    assert code == 200
+    host = payload["hosts"][0]
+    assert list(host["profiles"]) == ["90000002"]
+    assert host["accounts"] == ["90000002"]
+
+    preview = serve.executor_preview()
+    simulation, formal = preview["accounts"]
+    assert simulation["candidates"] == []
+    assert formal["candidates"][0]["host_id"] == "host-105"
+
+
+def test_invalid_profile_timestamp_removes_entire_host():
+    HOSTS.clear()
+    HOSTS["stale-host"] = {"host_id": "stale-host", "profiles": {
+        "90000001": {"sent_at": "not-a-timestamp"},
+    }}
+    assert serve._live_hosts_snapshot() == []
+    assert "stale-host" not in HOSTS
 
 
 def test_load_progress_scans_only_top_level_status_key():

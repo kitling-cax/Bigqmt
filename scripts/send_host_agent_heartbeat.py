@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from kitling_bigqmt.coordinator_endpoint import resolve_coordinator  # noqa: E402
 from kitling_bigqmt.host_agent_client import HostAgentClient  # noqa: E402
+from kitling_bigqmt.machine_config import load_tray_profiles  # noqa: E402
 
 
 PROFILE_ACCOUNT = {
@@ -25,6 +26,15 @@ PROFILE_ACCOUNT = {
     "production_readonly": "90000002",
 }
 ALLOWED = {"UP", "DOWN", "UNKNOWN"}
+
+
+def configured_account(profile: str) -> str:
+    """Resolve the deployment-local account without exposing it in source."""
+    profiles = load_tray_profiles(ROOT).get("profiles", {})
+    node = profiles.get(profile) if isinstance(profiles, dict) else None
+    if isinstance(node, dict) and str(node.get("account_id") or "").strip():
+        return str(node["account_id"]).strip()
+    return PROFILE_ACCOUNT[profile]
 
 
 def main() -> int:
@@ -48,7 +58,7 @@ def main() -> int:
         "tray": args.tray,
     }
     result = HostAgentClient(endpoint, host_id).heartbeat(
-        services, account_ids=[PROFILE_ACCOUNT[args.profile]], version="native-tray-v1"
+        services, account_ids=[configured_account(args.profile)], version="native-tray-v1"
     )
     print(json.dumps({"profile": args.profile, "services": services, "result": result}, ensure_ascii=False))
     return 0

@@ -49,3 +49,7 @@ test_out.txt
 
 # Public source never tracks generated per-account tray directories
 tray/BigQMT_*/*
+
+# Per-host portable bundle roots (EXE + machine.local.json + outbox + logs)
+BigQMT_Host_*/
+BigQMT_Host_*/**/machine.local.json

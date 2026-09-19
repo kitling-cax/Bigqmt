@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,12 @@ SUPPORTED_PROFILES = ("simulation", "production_readonly")
 
 class MachineLocalConfigError(RuntimeError):
     """machine.local.json is present but malformed; runtime entry points must fail closed."""
+
+
+_PRIVATE_CONFIG_KEY_RE = re.compile(
+    r"(?:password|passwd|secret|token|credential|authorization|private[_-]?key|api[_-]?key)",
+    re.IGNORECASE,
+)
 
 _BS = chr(92)  # backslash, kept out of source to avoid escaping hazards
 _ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/](?!/)[^\"' ]+")
@@ -63,6 +70,55 @@ def env_name(profile: str) -> str:
     raise ValueError("unsupported profile: %s" % profile)
 
 
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _reject_private_config_secrets(value: Any, path: str = "") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _PRIVATE_CONFIG_KEY_RE.search(str(key)):
+                raise MachineLocalConfigError(
+                    "NAS private config contains a forbidden secret field: %s" % (path + str(key))
+                )
+            _reject_private_config_secrets(child, path + str(key) + ".")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_private_config_secrets(child, path + str(index) + ".")
+
+
+def _load_private_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MachineLocalConfigError("private config is unavailable or invalid: %s" % path) from exc
+    if not isinstance(data, dict):
+        raise MachineLocalConfigError("private config must be a JSON object: %s" % path)
+    _reject_private_config_secrets(data)
+    expected = os.environ.get("BIGQMT_PRIVATE_CONFIG_SHA256", "").strip().lower()
+    if expected:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected:
+            raise MachineLocalConfigError("private config SHA-256 does not match the pinned value")
+    return data
+
+
+def load_private_config(path: Path) -> dict[str, Any]:
+    """Load and validate an explicit NAS/private overlay.
+
+    This function is intentionally explicit. Runtime entry points call only
+    :func:`load_machine_local`, so a NAS outage never prevents a local tray
+    from starting.
+    """
+    return _load_private_file(Path(path).expanduser())
+
+
 def load_machine_local(root: Path | None = None) -> dict[str, Any]:
     """Read the machine-local override file.
 
@@ -72,17 +128,20 @@ def load_machine_local(root: Path | None = None) -> dict[str, Any]:
     """
     root = Path(root) if root else project_root()
     path = root / "config" / MACHINE_LOCAL_FILENAME
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MachineLocalConfigError(
-            "machine.local.json is not a valid JSON file: %s" % exc
-        ) from exc
-    if not isinstance(data, dict):
-        raise MachineLocalConfigError("machine.local.json must be a JSON object")
-    return data
+    local: dict[str, Any] = {}
+    if path.exists():
+        try:
+            local = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MachineLocalConfigError(
+                "machine.local.json is not a valid JSON file: %s" % exc
+            ) from exc
+        if not isinstance(local, dict):
+            raise MachineLocalConfigError("machine.local.json must be a JSON object")
+
+    # NAS is a bootstrap/update source only. Once written locally, the tray and
+    # every runtime loader must not open the share during startup.
+    return local
 
 
 def machine_environment(machine: dict[str, Any], profile: str) -> dict[str, Any]:
@@ -146,7 +205,7 @@ def _resolve_runtime_path(root: Path, value: Any) -> str:
 def apply_gateway_overrides(root: Path, profile: str, gateway: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the gateway config with machine-local overrides applied.
 
-    仅覆盖 Redis 端点与 state_db/audit_dir 的本地定位；不触碰账户、下单开关。
+    仅覆盖账户标识、Redis 端点与 state_db/audit_dir 的本地定位；不触碰下单开关。
     """
     out = dict(gateway)
     machine = load_machine_local(root)
@@ -159,6 +218,8 @@ def apply_gateway_overrides(root: Path, profile: str, gateway: dict[str, Any]) -
             if value not in (None, ""):
                 merged[key] = value
         out["redis"] = merged
+    if env.get("account_id"):
+        out["account_id"] = str(env["account_id"])
     for key in ("state_db", "audit_dir"):
         if out.get(key):
             out[key] = _resolve_runtime_path(root, out[key])
@@ -184,6 +245,8 @@ def load_tray_profiles(root: Path) -> dict[str, Any]:
         if not isinstance(entry, dict):
             continue
         env = machine_environment(machine, profile)
+        if env.get("account_id"):
+            entry["account_id"] = str(env["account_id"])
         if env.get("qmt_root"):
             entry["qmt_root"] = str(resolve_preset_path(env["qmt_root"], root))
         redis_override = env.get("redis")
