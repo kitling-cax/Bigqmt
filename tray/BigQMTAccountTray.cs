@@ -1580,7 +1580,10 @@ internal static class BigQMTAccountTray
             ok.Text = "删除选中";
             ok.Location = new Point(540, 372);
             ok.AutoSize = true;
-            ok.DialogResult = DialogResult.OK;
+            // DialogResult deliberately left as None so the form does not
+            // auto-close on click.  ContinueIfAnyChecked is the sole gate.
+            ok.DialogResult = DialogResult.None;
+            ok.Click += ContinueIfAnyChecked;
             Button cancel = new Button();
             cancel.Text = "取消";
             cancel.Location = new Point(680, 372);
@@ -1596,26 +1599,14 @@ internal static class BigQMTAccountTray
             int checkedCount = list.CheckedItems.Count;
             counter.Text = "已选 " + checkedCount + " / " + list.Items.Count + " 条";
             warning.Text = checkedCount == 0 ? "⚠ 未勾选任何条目。点方框或点文字切换勾选，然后点「删除选中」。" : "";
-        }
-
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            // Strip the auto-close from OK: only honor the click when at least
-            // one row is checked.  Empty selection keeps the form open so the
-            // user can correct it without restarting the whole flow.
-            if (ok != null)
-            {
-                ok.Click -= ContinueIfAnyChecked;
-                ok.Click += ContinueIfAnyChecked;
-            }
+            ok.Enabled = checkedCount > 0;
         }
 
         private void ContinueIfAnyChecked(object sender, EventArgs e)
         {
             if (list.CheckedItems.Count == 0)
             {
-                DialogResult = DialogResult.None;
+                // Defence in depth: button is also disabled in UpdateState.
                 UpdateState();
                 return;
             }
