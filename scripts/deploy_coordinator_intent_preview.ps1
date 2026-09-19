@@ -43,7 +43,7 @@ sudo install -m 0644 '$remoteTempRoot/src/kitling_bigqmt/strategy_catalog.py' '$
 rm -rf '$remoteTempRoot'
 sudo systemctl restart '$ServiceName'
 systemctl is-active '$ServiceName'
-for i in $(seq 1 12); do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   if curl --fail --silent --show-error '$CoordinatorHealthUrl'; then exit 0; fi
   sleep 2
 done
