@@ -29,6 +29,7 @@ internal static class BigQMTAccountTray
     private const string DashboardRoute = "/production-readonly/overview";
     private const string ProfileTitle = "BigQMT 正式只读";
 #endif
+    private const string StrategyIdV1115 = "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15";
     private static string Account;
 
     private static NotifyIcon tray;
@@ -44,6 +45,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem strategyDeploymentItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
+    private static ToolStripMenuItem strategyPolicyMenu;
     private static MutexHandle mutex;
     private static Icon trayIcon;
     private static string bridgeState = "未探测（只读）";
@@ -145,10 +147,20 @@ internal static class BigQMTAccountTray
         windowsStartupItem.CheckOnClick = true;
         windowsStartupItem.CheckedChanged += delegate { SetWindowsStartup(windowsStartupItem.Checked); };
         menu.Items.Add(windowsStartupItem);
-        strategyPolicyItem = new ToolStripMenuItem(Profile == "simulation" ? "启用 v1.1.15 模拟策略运行" : "允许已批准正式策略恢复意图");
-        strategyPolicyItem.CheckOnClick = true;
-        strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
-        menu.Items.Add(strategyPolicyItem);
+        if (Profile == "simulation")
+        {
+            // One checkable row per installed strategy, rebuilt when the
+            // installed set changes (see RebuildStrategyPolicyMenu).
+            strategyPolicyMenu = new ToolStripMenuItem("策略运行开关");
+            menu.Items.Add(strategyPolicyMenu);
+        }
+        else
+        {
+            strategyPolicyItem = new ToolStripMenuItem("允许已批准正式策略恢复意图");
+            strategyPolicyItem.CheckOnClick = true;
+            strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
+            menu.Items.Add(strategyPolicyItem);
+        }
         if (Profile == "simulation")
             menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
         menu.Items.Add("刷新全部状态", null, delegate { RefreshStatus(); });
@@ -176,7 +188,8 @@ internal static class BigQMTAccountTray
         Application.ApplicationExit += delegate { tray.Visible = false; if (trayIcon != null) trayIcon.Dispose(); Audit("tray_stopped", "user_exit"); mutex.Dispose(); };
         Audit("tray_started", "native_dotnet_one_account_exe; host_agent_embedded=true; read_only");
         windowsStartupItem.Checked = WindowsStartupEnabled();
-        strategyPolicyItem.Checked = StrategyPolicyEnabled();
+        if (Profile == "simulation") RebuildStrategyPolicyMenu();
+        else strategyPolicyItem.Checked = StrategyPolicyEnabled();
         RefreshStatus();
         Timer timer = new Timer();
         timer.Interval = 30000;
@@ -401,6 +414,7 @@ internal static class BigQMTAccountTray
         hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
         if (strategyDeploymentItem != null && lastStrategyDeploymentState.Length > 0)
             strategyDeploymentItem.Text = "策略部署：" + lastStrategyDeploymentState + "（安装不启动）";
+        if (Profile == "simulation") RebuildStrategyPolicyMenu();
         RefreshCoordinatorPreview();
         RefreshCoordinatorIntentPreview();
         string tip = ProfileTitle + " " + Account + "｜" + state;
@@ -517,10 +531,12 @@ internal static class BigQMTAccountTray
         lastStrategyDeploymentState = state;
         if (strategyDeploymentItem != null)
             strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
-        // Hide the v1.1.15 auto-run policy toggle when nothing is installed:
-        // the toggle is meaningless without a deployed strategy to run.
-        if (strategyPolicyItem != null)
-            strategyPolicyItem.Visible = localInstalled > 0;
+        // Hide the strategy run toggles when nothing is installed: the
+        // toggles are meaningless without a deployed strategy to run.
+        if (Profile == "simulation" && strategyPolicyMenu != null)
+            strategyPolicyMenu.Visible = localInstalled > 0;
+        else if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = true;
     }
 
     private static int LocalInstalledCount()
@@ -836,12 +852,99 @@ internal static class BigQMTAccountTray
 
     private static bool StrategyPolicyEnabled()
     {
+        // Production-only: the formal recovery intent flag.  Simulation uses
+        // the per-strategy toggles instead (see StrategyAutoRunEnabled + the
+        // dynamic 策略运行开关 submenu).
         try
         {
             string text = File.ReadAllText(Path.Combine(RootPath(), "config", "strategy_runtime_policy.json"), Encoding.UTF8);
-            return Profile == "simulation" ? text.IndexOf("\"v1_1_15_auto_run_enabled\": true") >= 0 : text.IndexOf("\"strategy_recovery_enabled\": true") >= 0;
+            return text.IndexOf("\"strategy_recovery_enabled\": true") >= 0;
         }
         catch { return false; }
+    }
+
+    private static bool StrategyAutoRunEnabled(string strategyId)
+    {
+        // Local truth: simulation.strategies.<strategy_id>.auto_run_enabled.
+        // Missing strategy or malformed config is fail-closed (false).
+        try
+        {
+            string text = File.ReadAllText(Path.Combine(RootPath(), "config", "strategy_runtime_policy.json"), Encoding.UTF8);
+            int idPos = text.IndexOf("\"" + strategyId + "\"", StringComparison.Ordinal);
+            if (idPos < 0) return false;
+            string window = text.Substring(idPos, Math.Min(180, text.Length - idPos));
+            int flagPos = window.IndexOf("\"auto_run_enabled\"", StringComparison.Ordinal);
+            if (flagPos < 0) return false;
+            string snippet = window.Substring(flagPos, Math.Min(48, window.Length - flagPos));
+            // JSON normalization writes ': true' / ': false'; only the true
+            // form matches the substring below, keeping false fail-closed.
+            return snippet.IndexOf(": true", StringComparison.Ordinal) >= 0
+                || snippet.IndexOf(":true", StringComparison.Ordinal) >= 0;
+        }
+        catch { return false; }
+    }
+
+    private static void SetStrategyAutoRun(string strategyId, bool enabled)
+    {
+        bool ok; string output = RunPython("set_strategy_auto_run.py", "--strategy-id \"" + strategyId + "\" --enabled " + (enabled ? "true" : "false"), 5000, out ok);
+        if (!ok)
+        {
+            MessageBox.Show("策略运行开关无法更新：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            // Flip the checkbox back but suppress the CheckedChanged loopback.
+            RebuildStrategyPolicyMenu();
+            return;
+        }
+        Audit("strategy_policy", (enabled ? "enabled" : "disabled") + " " + strategyId);
+    }
+
+    private static System.Collections.Generic.List<string> lastPolicyMenuIds =
+        new System.Collections.Generic.List<string>();
+    private static bool policyMenuRebuilding = false;
+
+    private static void RebuildStrategyPolicyMenu()
+    {
+        if (Profile != "simulation" || strategyPolicyMenu == null) return;
+        System.Collections.Generic.List<string> ids = new System.Collections.Generic.List<string>();
+        bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (ok)
+        {
+            // Collect installed strategy ids; an id that has no toggle keeps
+            // whatever policy state it had (no write, no delete of entries).
+            foreach (var entry in ParseInstalledEntries(listed))
+                if (!ids.Contains(entry["strategy_id"])) ids.Add(entry["strategy_id"]);
+        }
+        bool same = ids.Count == lastPolicyMenuIds.Count;
+        if (same) for (int i = 0; i < ids.Count; i++) if (ids[i] != lastPolicyMenuIds[i]) { same = false; break; }
+        if (same) return; // no change, avoid flicker
+
+        policyMenuRebuilding = true;
+        try
+        {
+            strategyPolicyMenu.DropDownItems.Clear();
+            if (ids.Count == 0)
+            {
+                ToolStripMenuItem empty = new ToolStripMenuItem("（无已安装策略）");
+                empty.Enabled = false;
+                strategyPolicyMenu.DropDownItems.Add(empty);
+            }
+            else
+            {
+                foreach (string id in ids)
+                {
+                    ToolStripMenuItem item = new ToolStripMenuItem("启用 " + id + " 自动运行");
+                    item.CheckOnClick = true;
+                    item.Checked = StrategyAutoRunEnabled(id);
+                    string captured = id;
+                    item.CheckedChanged += delegate
+                    {
+                        if (!policyMenuRebuilding) SetStrategyAutoRun(captured, item.Checked);
+                    };
+                    strategyPolicyMenu.DropDownItems.Add(item);
+                }
+            }
+            lastPolicyMenuIds = new System.Collections.Generic.List<string>(ids);
+        }
+        finally { policyMenuRebuilding = false; }
     }
 
     private static void SetStrategyPolicy(bool enabled)
@@ -987,8 +1090,11 @@ internal static class BigQMTAccountTray
         lastStrategyDeploymentState = state;
         if (strategyDeploymentItem != null)
             strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
-        if (strategyPolicyItem != null)
-            strategyPolicyItem.Visible = localInstalled > 0;
+        if (Profile == "simulation" && strategyPolicyMenu != null)
+            strategyPolicyMenu.Visible = localInstalled > 0;
+        else if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = true;
+        RebuildStrategyPolicyMenu();
         Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false; visible=" + (localInstalled > 0));
     }
 
@@ -1342,9 +1448,10 @@ internal static class BigQMTAccountTray
 
     private static void SimulationCycleIfDue(DateTime now, string today)
     {
-        // The master strategy switch must be on, it must be a weekday, and the
-        // wall clock must be inside the A-share continuous session window.
-        if (!StrategyPolicyEnabled()) return;
+        // The per-strategy run switch for the v1.1.15 simulator must be on, it
+        // must be a weekday, and the wall clock must be inside the A-share
+        // continuous session window.
+        if (!StrategyAutoRunEnabled(StrategyIdV1115)) return;
         if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday) return;
         if (now.Hour < 9 || (now.Hour == 9 && now.Minute < 35)) return;
         if (now.Hour > 14 || (now.Hour == 14 && now.Minute > 50)) return;
