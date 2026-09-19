@@ -25,7 +25,11 @@ foreach ($item in @(
 
 $manifest = foreach ($name in 'BigQMT_Simulation.exe', 'BigQMT_Production_ReadOnly.exe') {
   $path = Join-Path $ProjectRoot ('tray\' + $name)
-  $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+  $hash = $null
+  for ($attempt = 1; $attempt -le 10 -and -not $hash; $attempt++) {
+    try { $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash }
+    catch { if ($attempt -eq 10) { throw }; Start-Sleep -Milliseconds 500 }
+  }
   "$hash  $name"
 }
 [IO.File]::WriteAllLines((Join-Path $ProjectRoot 'tray\BigQMT_native_tray_checksums.sha256'), $manifest, (New-Object System.Text.UTF8Encoding($false)))
