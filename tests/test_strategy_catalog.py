@@ -2,7 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from kitling_bigqmt.strategy_catalog import list_candidates
+from kitling_bigqmt.strategy_catalog import catalog_html, list_candidates
 
 
 def test_catalog_lists_verified_candidate(tmp_path: Path, monkeypatch):
@@ -35,3 +35,10 @@ def test_catalog_rejects_unsafe_flags(tmp_path: Path, monkeypatch):
     }), encoding="utf-8")
     monkeypatch.setenv("BIGQMT_STRATEGY_LIBRARY_ROOT", str(tmp_path / "strategies"))
     assert list_candidates(tmp_path)["candidates"][0]["status"] == "INVALID"
+
+
+def test_catalog_page_is_readonly_and_has_no_push_action():
+    page = catalog_html()
+    assert "BigQMT 私有策略库" in page
+    assert "推送/安装：待实现" in page
+    assert "orders_enabled=false" in page

@@ -43,7 +43,11 @@ sudo install -m 0644 '$remoteTempRoot/src/kitling_bigqmt/strategy_catalog.py' '$
 rm -rf '$remoteTempRoot'
 sudo systemctl restart '$ServiceName'
 systemctl is-active '$ServiceName'
-curl --fail --silent --show-error '$CoordinatorHealthUrl'
+for i in $(seq 1 12); do
+  if curl --fail --silent --show-error '$CoordinatorHealthUrl'; then exit 0; fi
+  sleep 2
+done
+exit 1
 "@
 & ssh -tt -- $RemoteHost $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "remote deployment or health check failed; backup remains at $remoteBackup" }
