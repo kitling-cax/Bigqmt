@@ -888,13 +888,37 @@ internal static class BigQMTAccountTray
             Audit("strategy_uninstall_cancelled", "no_installs");
             return;
         }
+        int[] selected = PromptStrategySelection(entries);
+        if (selected == null)
+        {
+            Audit("strategy_uninstall_cancelled", "no_selection");
+            return;
+        }
+        if (selected.Length == 0)
+        {
+            // The form refuses to close with 0 rows selected, so this is a
+            // silent fallback only; never pop another dialog here.
+            Audit("strategy_uninstall_cancelled", "empty_selection");
+            return;
+        }
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> toDelete =
+            new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>>();
+        foreach (int index in selected)
+        {
+            if (index >= 0 && index < entries.Count) toDelete.Add(entries[index]);
+        }
+        if (toDelete.Count == 0)
+        {
+            Audit("strategy_uninstall_cancelled", "empty_selection");
+            return;
+        }
         System.Text.StringBuilder preview = new System.Text.StringBuilder();
-        foreach (var entry in entries)
+        foreach (var entry in toDelete)
         {
             preview.Append("  • ").Append(entry["strategy_id"]).Append("  ").Append(entry["version"]).Append("  ").Append(entry["build_id"]).Append("\n");
         }
         if (MessageBox.Show(
-            "将永久删除本机以下 " + entries.Count + " 个已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" +
+            "将永久删除本机以下 " + toDelete.Count + " 个已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" +
             preview.ToString() +
             "\n确认继续？",
             ProfileTitle,
@@ -906,7 +930,7 @@ internal static class BigQMTAccountTray
         }
 
         int removed = 0; int missing = 0; System.Text.StringBuilder errors = new System.Text.StringBuilder();
-        foreach (var entry in entries)
+        foreach (var entry in toDelete)
         {
             string args = "--strategy-id \"" + entry["strategy_id"] + "\" --version \"" + entry["version"] + "\" --build-id \"" + entry["build_id"] + "\"";
             bool itemOk; string output = RunPython("uninstall_strategy_package.py", args, 30000, out itemOk);
@@ -940,7 +964,7 @@ internal static class BigQMTAccountTray
             if (objEnd < 0) break;
             string entry = listJson.Substring(objStart, objEnd - objStart + 1);
             var map = new System.Collections.Generic.Dictionary<string, string>();
-            foreach (string key in new[] { "strategy_id", "version", "build_id" })
+            foreach (string key in new[] { "strategy_id", "version", "build_id", "artifact_count" })
             {
                 map[key] = ExtractJsonString(entry, key);
             }
@@ -966,6 +990,21 @@ internal static class BigQMTAccountTray
         if (strategyPolicyItem != null)
             strategyPolicyItem.Visible = localInstalled > 0;
         Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false; visible=" + (localInstalled > 0));
+    }
+
+    private static int[] PromptStrategySelection(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> entries)
+    {
+        System.Collections.Generic.List<string> rows = new System.Collections.Generic.List<string>();
+        foreach (var entry in entries)
+        {
+            rows.Add(entry["strategy_id"] + "\n    " + entry["version"] + "  " + entry["build_id"] + "  " +
+                     "(" + (entry.ContainsKey("artifact_count") && entry["artifact_count"].Length > 0 ? entry["artifact_count"] : "?") + " 个产物)");
+        }
+        using (UninstallSelectionForm form = new UninstallSelectionForm(rows))
+        {
+            if (form.ShowDialog() != DialogResult.OK) return null;
+            return form.SelectedIndicesCopy();
+        }
     }
 
     private static bool PromptPassword(string title, string label, out string password)
@@ -1434,6 +1473,98 @@ internal static class BigQMTAccountTray
         public readonly bool IsFirstInstance;
         public MutexHandle(string name) { inner = new System.Threading.Mutex(true, name, out IsFirstInstance); }
         public void Dispose() { if (IsFirstInstance) inner.ReleaseMutex(); inner.Dispose(); }
+    }
+
+    private sealed class UninstallSelectionForm : Form
+    {
+        private readonly ListBox list;
+        private readonly Label counter;
+        private readonly Label warning;
+        private readonly Button ok;
+        private string[] rows;
+        public UninstallSelectionForm(System.Collections.Generic.IList<string> rows)
+        {
+            this.rows = new string[rows.Count];
+            rows.CopyTo(this.rows, 0);
+            Text = "选择要删除的策略（点击行=选中/取消选中，可多选）";
+            FormBorderStyle = FormBorderStyle.Sizable;
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimizeBox = false; ShowInTaskbar = false;
+            ClientSize = new Size(760, 400);
+            Label hint = new Label();
+            hint.Text = "用鼠标点击行即可选中（高亮）或取消选中。可一次选多条。\n" +
+                        "点「删除选中」删除高亮的行；什么都不想删就点「取消」。";
+            hint.AutoSize = true;
+            hint.Location = new Point(12, 8);
+            list = new ListBox();
+            list.Location = new Point(12, 56);
+            list.Size = new Size(736, 280);
+            list.SelectionMode = SelectionMode.MultiSimple;
+            list.Font = new System.Drawing.Font("Consolas", 10F);
+            foreach (string row in rows) list.Items.Add(row);
+            // SelectedIndexChanged fires AFTER the selection changes (well
+            // behaved in .NET Framework 4, unlike CheckedListBox.ItemCheck).
+            list.SelectedIndexChanged += delegate { UpdateState(); };
+            counter = new Label();
+            counter.AutoSize = true;
+            counter.Location = new Point(12, 344);
+            counter.Text = "已选 0 / " + rows.Count + " 条";
+            warning = new Label();
+            warning.AutoSize = true;
+            warning.Location = new Point(12, 368);
+            warning.ForeColor = Color.FromArgb(170, 30, 30);
+            warning.Text = "⚠ 未选中任何策略。点行选中后再点「删除选中」";
+            Button all = new Button();
+            all.Text = "全选";
+            all.Location = new Point(12, 368);
+            all.AutoSize = true;
+            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetSelected(i, true); UpdateState(); };
+            Button none = new Button();
+            none.Text = "全不选";
+            none.Location = new Point(80, 368);
+            none.AutoSize = true;
+            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetSelected(i, false); UpdateState(); };
+            ok = new Button();
+            ok.Text = "删除选中";
+            ok.Location = new Point(540, 368);
+            ok.AutoSize = true;
+            ok.DialogResult = DialogResult.None; // no auto-close on click
+            ok.Click += ConfirmClick;
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(680, 368);
+            cancel.AutoSize = true;
+            cancel.DialogResult = DialogResult.Cancel;
+            AcceptButton = ok; CancelButton = cancel;
+            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(warning); Controls.Add(all); Controls.Add(none); Controls.Add(ok); Controls.Add(cancel);
+            UpdateState();
+        }
+
+        private void UpdateState()
+        {
+            int count = list.SelectedIndices.Count;
+            counter.Text = "已选 " + count + " / " + list.Items.Count + " 条";
+            warning.Text = count == 0 ? "⚠ 未选中任何策略。点行选中后再点「删除选中」" : "";
+            ok.Enabled = count > 0;
+        }
+
+        private void ConfirmClick(object sender, EventArgs e)
+        {
+            if (list.SelectedIndices.Count == 0)
+            {
+                UpdateState();
+                return;
+            }
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        public int[] SelectedIndicesCopy()
+        {
+            int[] copy = new int[list.SelectedIndices.Count];
+            list.SelectedIndices.CopyTo(copy, 0);
+            return copy;
+        }
     }
 
     private sealed class PasswordPromptForm : Form
