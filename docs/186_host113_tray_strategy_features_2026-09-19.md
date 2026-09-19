@@ -22,6 +22,8 @@
 cd E:\kitling_QMT_work\kitling_bigqmt
 git fetch origin 'refs/heads/*:refs/remotes/origin/*'
 git checkout host/113/structure
+# 先合并 184/185 的基线（若已合并过会自动 up to date，幂等），再合并本单特性
+git merge --no-edit origin/feature/strategy-deployment
 # 若本机分支已有自己改动：先看 git status，不要覆盖 machine.local.json / 凭据 / 运行数据
 git merge --no-edit origin/feature/tray-strategy-control
 ```
