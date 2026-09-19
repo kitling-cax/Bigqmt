@@ -16,7 +16,9 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sources = @(
     @{ Local = (Join-Path $projectRoot "scripts\coordinator\serve.py"); Remote = "scripts/coordinator/serve.py" },
-    @{ Local = (Join-Path $projectRoot "src\kitling_bigqmt\strategy_catalog.py"); Remote = "src/kitling_bigqmt/strategy_catalog.py" }
+    @{ Local = (Join-Path $projectRoot "src\kitling_bigqmt\strategy_catalog.py"); Remote = "src/kitling_bigqmt/strategy_catalog.py" },
+    @{ Local = (Join-Path $projectRoot "src\kitling_bigqmt\strategy_catalog_page.py"); Remote = "src/kitling_bigqmt/strategy_catalog_page.py" },
+    @{ Local = (Join-Path $projectRoot "src\kitling_bigqmt\strategy_deployment.py"); Remote = "src/kitling_bigqmt/strategy_deployment.py" }
 )
 foreach ($item in $sources) { if (-not (Test-Path -LiteralPath $item.Local)) { throw "missing local Coordinator source: $($item.Local)" } }
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -38,8 +40,12 @@ set -eu
 sudo mkdir -p '$remoteBackup'
 sudo cp '$RemoteRoot/scripts/coordinator/serve.py' '$remoteBackup/serve.py'
 if [ -f '$RemoteRoot/src/kitling_bigqmt/strategy_catalog.py' ]; then sudo cp '$RemoteRoot/src/kitling_bigqmt/strategy_catalog.py' '$remoteBackup/strategy_catalog.py'; fi
+if [ -f '$RemoteRoot/src/kitling_bigqmt/strategy_catalog_page.py' ]; then sudo cp '$RemoteRoot/src/kitling_bigqmt/strategy_catalog_page.py' '$remoteBackup/strategy_catalog_page.py'; fi
+if [ -f '$RemoteRoot/src/kitling_bigqmt/strategy_deployment.py' ]; then sudo cp '$RemoteRoot/src/kitling_bigqmt/strategy_deployment.py' '$remoteBackup/strategy_deployment.py'; fi
 sudo install -m 0644 '$remoteTempRoot/scripts/coordinator/serve.py' '$RemoteRoot/scripts/coordinator/serve.py'
 sudo install -m 0644 '$remoteTempRoot/src/kitling_bigqmt/strategy_catalog.py' '$RemoteRoot/src/kitling_bigqmt/strategy_catalog.py'
+sudo install -m 0644 '$remoteTempRoot/src/kitling_bigqmt/strategy_catalog_page.py' '$RemoteRoot/src/kitling_bigqmt/strategy_catalog_page.py'
+sudo install -m 0644 '$remoteTempRoot/src/kitling_bigqmt/strategy_deployment.py' '$RemoteRoot/src/kitling_bigqmt/strategy_deployment.py'
 rm -rf '$remoteTempRoot'
 sudo systemctl restart '$ServiceName'
 systemctl is-active '$ServiceName'
