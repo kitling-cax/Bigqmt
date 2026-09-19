@@ -500,6 +500,10 @@ internal static class BigQMTAccountTray
         {
             state = "等待本机策略库配置";
         }
+        else if (output.IndexOf("\"status\": \"busy\"", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            state = "其他托盘正在拉取";
+        }
         else
         {
             state = "拉取失败（保留订单锁）";
