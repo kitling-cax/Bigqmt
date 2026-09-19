@@ -492,11 +492,16 @@ internal static class BigQMTAccountTray
         bool ok;
         string output = RunPython("poll_strategy_deployments.py", "--once", 45000, out ok);
         string state;
-        if (output.IndexOf("\"status\": \"ok\"") >= 0)
+        int localInstalled = LocalInstalledCount();
+        if (localInstalled > 0)
+        {
+            state = "已安装（未启动）; 本地 " + localInstalled + " 条";
+        }
+        else if (output.IndexOf("\"status\": \"ok\"") >= 0)
         {
             int marker = output.IndexOf("\"deployments\":", StringComparison.Ordinal);
-            if (marker >= 0) state = output.IndexOf("\"status\": \"INSTALLED\"") >= 0 ? "已安装（未启动）" : "无待安装请求";
-            else state = "拉取完成";
+            if (marker >= 0) state = "无待安装请求; 本地无安装";
+            else state = "拉取完成; 本地无安装";
         }
         else if (output.IndexOf("library_root is not configured", StringComparison.OrdinalIgnoreCase) >= 0)
         {
@@ -511,6 +516,24 @@ internal static class BigQMTAccountTray
         lastStrategyDeploymentState = state;
         if (strategyDeploymentItem != null)
             strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
+    }
+
+    private static int LocalInstalledCount()
+    {
+        bool ok;
+        string output = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (!ok) return 0;
+        // Avoid System.Web.Script.Serialization quirks: count "strategy_id"
+        // occurrences inside the JSON returned by --list.  Each installed
+        // entry contributes exactly one such key, so this is a stable
+        // approximation and matches the on-disk truth regardless of how the
+        // serializer shapes nested arrays.
+        int count = 0; int index = 0;
+        while ((index = output.IndexOf("\"strategy_id\"", index, StringComparison.Ordinal)) >= 0)
+        {
+            count++; index += "\"strategy_id\"".Length;
+        }
+        return count;
     }
 
     private static void RefreshCoordinatorPreview()
@@ -889,7 +912,22 @@ internal static class BigQMTAccountTray
         }
         string summary = "删除完成：成功 " + removed + " 条" + (missing > 0 ? "，目标已不存在 " + missing + " 条" : "") + (errors.Length > 0 ? "，失败 " + errors.Length + " 条" : "");
         MessageBox.Show(summary + (errors.Length > 0 ? "\n\n失败详情：\n" + errors.ToString() : ""), ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        if (removed > 0) RefreshStatus();
+        if (removed > 0 || missing > 0) RefreshLocalInstallMenuState();
+    }
+
+    private static void RefreshLocalInstallMenuState()
+    {
+        // Re-derive the strategy deployment menu text purely from the local
+        // install_root.  This is what the user sees right after an uninstall,
+        // before the next 30s Coordinator poll tick has run.
+        int localInstalled = LocalInstalledCount();
+        string state = localInstalled > 0
+            ? "已安装（未启动）; 本地 " + localInstalled + " 条"
+            : "无待安装请求; 本地无安装";
+        lastStrategyDeploymentState = state;
+        if (strategyDeploymentItem != null)
+            strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
+        Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false");
     }
 
     private static bool PromptPassword(string title, string label, out string password)
