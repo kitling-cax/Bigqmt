@@ -149,7 +149,8 @@ internal static class BigQMTAccountTray
         strategyPolicyItem.CheckOnClick = true;
         strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
         menu.Items.Add(strategyPolicyItem);
-        menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
+        if (Profile == "simulation")
+            menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
         menu.Items.Add("刷新全部状态", null, delegate { RefreshStatus(); });
         menu.Items.Add("锁定订单状态", null, delegate { LockReminder(); });
         menu.Items.Add(new ToolStripSeparator());
@@ -1518,58 +1519,100 @@ internal static class BigQMTAccountTray
     {
         private readonly CheckedListBox list;
         private readonly Label counter;
+        private readonly Label warning;
+        private readonly Button ok;
         public UninstallSelectionForm(System.Collections.Generic.IList<string> labels)
         {
             Text = "选择要删除的已安装策略（共 " + labels.Count + " 条，默认全勾）";
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             MinimizeBox = false; ShowInTaskbar = false;
-            ClientSize = new Size(760, 380);
+            ClientSize = new Size(780, 420);
             Label hint = new Label();
-            hint.Text = "行首的小方框 [ ] 是勾选框。点方框或点文字都会切换勾选状态。\n" +
-                        "默认全勾，要保留哪个就取消勾选哪个。然后点「删除选中」。";
+            hint.Text = "每行最前面的方框 [X] 表示已勾选，[ ] 表示未勾选。\n" +
+                        "点方框或点文字都会切换状态。要删除谁就保持谁勾选。\n" +
+                        "默认全勾；想保留谁就点一下取消它的勾。";
             hint.AutoSize = true;
             hint.Location = new Point(12, 8);
             list = new CheckedListBox();
-            list.Location = new Point(12, 48);
-            list.Size = new Size(736, 240);
+            list.Location = new Point(12, 60);
+            list.Size = new Size(756, 280);
             list.CheckOnClick = true;
             list.IntegralHeight = false;
             list.Font = new System.Drawing.Font("Consolas", 10F);
-            foreach (string label in labels) list.Items.Add("[☐] " + label, true);
+            foreach (string label in labels) list.Items.Add("[X] " + label, true);
             counter = new Label();
             counter.AutoSize = true;
-            counter.Location = new Point(12, 296);
+            counter.Location = new Point(12, 348);
             counter.Text = "已选 " + labels.Count + " / " + labels.Count + " 条（全勾）";
-            list.ItemCheck += delegate { counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
+            list.ItemCheck += delegate { UpdateState(); };
+            warning = new Label();
+            warning.AutoSize = true;
+            warning.Location = new Point(12, 372);
+            warning.ForeColor = Color.FromArgb(170, 30, 30);
+            warning.Text = "";
             Button all = new Button();
             all.Text = "全选";
-            all.Location = new Point(12, 328);
+            all.Location = new Point(12, 372);
             all.AutoSize = true;
-            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); counter.Text = "已选 " + list.Items.Count + " / " + labels.Count + " 条"; };
+            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); UpdateState(); };
             Button none = new Button();
             none.Text = "全不选";
-            none.Location = new Point(80, 328);
+            none.Location = new Point(80, 372);
             none.AutoSize = true;
-            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); counter.Text = "已选 0 / " + labels.Count + " 条"; };
+            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); UpdateState(); };
             Button invert = new Button();
             invert.Text = "反选";
-            invert.Location = new Point(160, 328);
+            invert.Location = new Point(160, 372);
             invert.AutoSize = true;
-            invert.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, !list.GetItemChecked(i)); counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
-            Button ok = new Button();
+            invert.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, !list.GetItemChecked(i)); UpdateState(); };
+            ok = new Button();
             ok.Text = "删除选中";
-            ok.Location = new Point(520, 328);
+            ok.Location = new Point(540, 372);
             ok.AutoSize = true;
             ok.DialogResult = DialogResult.OK;
             Button cancel = new Button();
             cancel.Text = "取消";
-            cancel.Location = new Point(660, 328);
+            cancel.Location = new Point(680, 372);
             cancel.AutoSize = true;
             cancel.DialogResult = DialogResult.Cancel;
             AcceptButton = ok; CancelButton = cancel;
-            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(all); Controls.Add(none); Controls.Add(invert); Controls.Add(ok); Controls.Add(cancel);
+            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(warning); Controls.Add(all); Controls.Add(none); Controls.Add(invert); Controls.Add(ok); Controls.Add(cancel);
+            UpdateState();
         }
+
+        private void UpdateState()
+        {
+            int checkedCount = list.CheckedItems.Count;
+            counter.Text = "已选 " + checkedCount + " / " + list.Items.Count + " 条";
+            warning.Text = checkedCount == 0 ? "⚠ 未勾选任何条目。点方框或点文字切换勾选，然后点「删除选中」。" : "";
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // Strip the auto-close from OK: only honor the click when at least
+            // one row is checked.  Empty selection keeps the form open so the
+            // user can correct it without restarting the whole flow.
+            if (ok != null)
+            {
+                ok.Click -= ContinueIfAnyChecked;
+                ok.Click += ContinueIfAnyChecked;
+            }
+        }
+
+        private void ContinueIfAnyChecked(object sender, EventArgs e)
+        {
+            if (list.CheckedItems.Count == 0)
+            {
+                DialogResult = DialogResult.None;
+                UpdateState();
+                return;
+            }
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
         public System.Collections.Generic.List<string> SelectedLabels()
         {
             System.Collections.Generic.List<string> picked = new System.Collections.Generic.List<string>();
@@ -1577,9 +1620,7 @@ internal static class BigQMTAccountTray
             {
                 string raw = item as string;
                 if (raw == null) continue;
-                // Strip the "[ ] " / "[x] " prefix so the caller can split on "  |  ".
-                if (raw.StartsWith("[☐] ")) raw = raw.Substring(4);
-                else if (raw.StartsWith("[☑] ")) raw = raw.Substring(4);
+                if (raw.StartsWith("[X] ") || raw.StartsWith("[ ] ")) raw = raw.Substring(4);
                 picked.Add(raw);
             }
             return picked;
