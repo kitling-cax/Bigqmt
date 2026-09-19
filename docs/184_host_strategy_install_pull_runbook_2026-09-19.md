@@ -22,11 +22,17 @@
 ```powershell
 cd E:\kitling_QMT_work\kitling_bigqmt
 git fetch origin 'refs/heads/*:refs/remotes/origin/*'
+# 保留本机 host 分支；先把 105 发布的框架分支合入本机分支。
 git checkout host/125/structure   # .125；.113 改为 host/113/structure
 git pull --rebase origin host/125/structure   # .113 改为 host/113/structure
+git merge --no-edit origin/feature/strategy-deployment
 py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog_page.py -q
 .\scripts\build_native_account_trays.ps1
 ```
+
+本次框架发布分支为 `feature/strategy-deployment`，对应 GitHub 仓库
+`https://github.com/kitling-cax/Bigqmt`。如本机分支已有同名实现，不要强行覆盖；先让 Claude
+检查差异并解决冲突。私有策略包、`machine.local.json`、凭据和运行数据仍只留在本机/NAS。
 
 确认 `config/machine.local.json` 增加本机私有配置（不要提交 GitHub）：
 
@@ -64,4 +70,3 @@ py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog
 - 不要把正式账户策略安装请求当成正式下单授权；
 - 不要在回归中点击策略启动或执行按钮；
 - 不要让同一策略账户在多台主机同时进入 `ACTIVE_EXECUTOR`。
-

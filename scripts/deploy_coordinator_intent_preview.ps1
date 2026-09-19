@@ -5,11 +5,11 @@ No credentials are stored by this script. SSH/SCP prompt interactively.
 #>
 [CmdletBinding()]
 param(
-    [string]$RemoteHost = "kitling@192.0.2.121",
-    [string]$RemoteRoot = "/opt/bigqmt-coordinator/current",
-    [string]$RemoteBackupRoot = "/opt/bigqmt-coordinator/backups",
+    [string]$RemoteHost = "kitling@192.168.1.121",
+    [string]$RemoteRoot = "/opt/kitling-bigqmt-coordinator/current",
+    [string]$RemoteBackupRoot = "/opt/kitling-bigqmt-coordinator/backups",
     [string]$ServiceName = "kitling-bigqmt-coordinator.service",
-    [string]$CoordinatorHealthUrl = "http://192.0.2.121:18443/healthz"
+    [string]$CoordinatorHealthUrl = "http://192.168.1.121:18443/healthz"
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,4 +59,4 @@ exit 1
 if ($LASTEXITCODE -ne 0) { throw "remote deployment or health check failed; backup remains at $remoteBackup" }
 
 Write-Host "[3/3] Deployment completed. Run the local probe next:"
-Write-Host "py -3.12 scripts\probe_host_agent_intent_preview.py --endpoint http://192.0.2.121:18443 --host-id 192.0.2.105"
+Write-Host "py -3.12 scripts\probe_host_agent_intent_preview.py --endpoint http://192.168.1.121:18443 --host-id 192.168.1.105"
