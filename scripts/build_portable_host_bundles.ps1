@@ -1,5 +1,8 @@
 param(
-  [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot)
+  [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
+  [string]$Host125Id,
+  [string]$Host113Id,
+  [string]$CoordinatorShadowEndpoint
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,10 +12,22 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $csc)) { throw "C# compiler unavailable: $csc" }
 $source = Join-Path $ProjectRoot 'tray\BigQMTHostAgentTray.cs'
 $modules = '__init__.py','coordinator_outbox.py','coordinator_fact_auth.py','host_fact_identity.py','host_fact_uploader.py','host_agent_account_policy.py','execution_lease_guard.py'
+$Host125Id = ([string]$Host125Id).Trim()
+$Host113Id = ([string]$Host113Id).Trim()
+$CoordinatorShadowEndpoint = ([string]$CoordinatorShadowEndpoint).Trim()
+if ([string]::IsNullOrWhiteSpace($Host125Id) -or [string]::IsNullOrWhiteSpace($Host113Id) -or [string]::IsNullOrWhiteSpace($CoordinatorShadowEndpoint)) {
+  throw 'Host125Id, Host113Id and CoordinatorShadowEndpoint are required; refusing historical test-net placeholders.'
+}
+if ($Host125Id -match '^(192\.0\.2\.|198\.51\.100\.)' -or $Host113Id -match '^(192\.0\.2\.|198\.51\.100\.)' -or $CoordinatorShadowEndpoint -match '192\.0\.2\.') {
+  throw 'Test-net placeholder host or endpoint is not allowed in a portable bundle.'
+}
+if ($CoordinatorShadowEndpoint -notmatch ':18666/api/v1/facts/ingest$') {
+  throw 'CoordinatorShadowEndpoint must be the facts-only Shadow 18666 endpoint.'
+}
 
 foreach ($machine in @(
-  @{ Name='BigQMT_Host_125'; HostId='192.0.2.125'; KeyId='host-125-fact-shadow-20260917' },
-  @{ Name='BigQMT_Host_113'; HostId='198.51.100.113'; KeyId='host-113-fact-shadow-20260917' }
+  @{ Name='BigQMT_Host_125'; HostId=$Host125Id; KeyId='host-125-fact-shadow-20260917' },
+  @{ Name='BigQMT_Host_113'; HostId=$Host113Id; KeyId='host-113-fact-shadow-20260917' }
 )) {
   $bundle = Join-Path $releaseRoot $machine.Name
   New-Item -ItemType Directory -Force -Path $bundle, (Join-Path $bundle 'scripts\host_agent'), (Join-Path $bundle 'scripts\coordinator'), (Join-Path $bundle 'src\kitling_bigqmt'), (Join-Path $bundle 'state\simulation'), (Join-Path $bundle 'logs') | Out-Null
@@ -31,7 +46,7 @@ foreach ($machine in @(
     audit_path = '../runtime_data/audit/simulation/native_tray.jsonl'
     outbox_path = 'state/simulation/host_agent_outbox.sqlite3'
     fact_secret_path = ('C:/ProgramData/Kitling/BigQMT/host-facts/' + $machine.KeyId + '.json')
-    coordinator_endpoint = 'http://192.0.2.121:18666/api/v1/facts/ingest'
+    coordinator_endpoint = $CoordinatorShadowEndpoint
     interval_seconds = 300
     orders_enabled = $false
   }
