@@ -891,7 +891,11 @@ internal static class BigQMTAccountTray
         }
         if (selections.Count == 0)
         {
-            MessageBox.Show("未勾选任何条目。取消本次删除。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // The form's own gating (button disabled, ContinueIfAnyChecked
+            // refusing to close on 0 rows) is the primary defence.  This is
+            // a silent fallback for any edge case (Enter on AcceptButton,
+            // double-click race, etc.) where the form still ends up closing
+            // with no rows checked.  Do not show another popup; just audit.
             Audit("strategy_uninstall_cancelled", "empty_selection");
             return;
         }
