@@ -57,7 +57,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Cannot install enrollment script on Coordinato
 & scp -q -- $SecretFile "${CoordinatorHost}:$remoteSecret"
 if ($LASTEXITCODE -ne 0) { throw 'Cannot transfer Fact Secret to Coordinator staging directory.' }
 
-& ssh $CoordinatorHost "chmod 600 $remoteSecret && bash $RemoteScript $remoteSecret"
+& ssh $CoordinatorHost "chmod 600 $remoteSecret && sudo bash $RemoteScript $remoteSecret"
 if ($LASTEXITCODE -ne 0) {
     throw 'Enrollment failed. The staged copy remains on .121 for protected operator inspection; do not copy it to NAS, Git, or chat.'
 }
