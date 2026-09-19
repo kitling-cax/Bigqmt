@@ -29,12 +29,13 @@ STRATEGY_ID = "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15"
 
 def main() -> int:
     config = load_gateway(ROOT, "simulation")
-    if config.get("environment") != "simulation" or str(config.get("account_id")) != "90000001":
-        raise SystemExit("daily record is bound to simulation account 90000001")
+    account_id = str(config.get("account_id") or "").strip()
+    if config.get("environment") != "simulation" or not account_id:
+        raise SystemExit("daily record requires a configured simulation account")
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     day = now.strftime("%Y%m%d")
     redis = RedisRespClient(**dict(config["redis"]))
-    client = ReadOnlyBigQmtClient(redis, str(config["account_id"]), float(config.get("rpc_timeout_seconds", 12)))
+    client = ReadOnlyBigQmtClient(redis, account_id, float(config.get("rpc_timeout_seconds", 12)))
     store = RuntimeStateStore(Path(config["state_db"]), Path(config["audit_dir"]))
     accounting = SleeveAccounting(store)
     attributable_trades_reply = client.trades()
@@ -91,7 +92,7 @@ def main() -> int:
                           "mean_return": point["mean_return"]})
     except Exception as exc:
         benchmark = {"status": "UNAVAILABLE", "reason": "%s: %s" % (type(exc).__name__, exc)}
-    baseline = json.loads((ROOT / "runtime_data" / "baselines" / "simulation_90000001_external_positions.json").read_text(encoding="utf-8"))
+    baseline = json.loads((ROOT / "runtime_data" / "baselines" / ("simulation_%s_external_positions.json" % account_id)).read_text(encoding="utf-8"))
     broker = {code: int((row or {}).get("volume") or 0) for code, row in positions.items()}
     owned = owned_quantities
     reconciliation = reconcile_daily_positions(broker, dict(baseline.get("positions") or {}), owned)
@@ -103,7 +104,7 @@ def main() -> int:
         "kind": "v1_1_15_simulation_daily_operations",
         "recorded_at": now.isoformat(),
         "trading_day": day,
-        "account_id": "90000001",
+        "account_id": account_id,
         "strategy_id": STRATEGY_ID,
         "bridge": ping_reply.get("data"),
         "account": asset_reply.get("data"),
