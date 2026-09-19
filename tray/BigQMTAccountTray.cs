@@ -948,34 +948,44 @@ internal static class BigQMTAccountTray
 
     private static bool PromptStrategySelection(string listJson, out string installRoot, System.Collections.Generic.List<string> selections)
     {
-        installRoot = ""; selections = new System.Collections.Generic.List<string>();
+        installRoot = ExtractJsonString(listJson, "install_root");
+        selections = new System.Collections.Generic.List<string>();
         try
         {
-            object parsed = new JavaScriptSerializer().DeserializeObject(listJson);
-            var root = parsed as System.Collections.Generic.Dictionary<string, object>;
-            if (root == null) return false;
-            object rootValue;
-            if (root.TryGetValue("install_root", out rootValue)) installRoot = Convert.ToString(rootValue);
-            object items;
-            if (!root.TryGetValue("installed", out items)) return true;
-            var array = items as System.Collections.Generic.List<object>;
-            if (array == null || array.Count == 0) return true;
+            // Robust against JavaScriptSerializer quirks on nested arrays: scan
+            // for every '{...}' object after the 'installed' key and pull
+            // strategy_id / version / build_id / installed_at / artifact_count
+            // out of each object with direct string searches.
+            int arrayStart = listJson.IndexOf("\"installed\":", StringComparison.Ordinal);
+            if (arrayStart < 0) return true;
+            int arrayOpen = listJson.IndexOf('[', arrayStart);
+            if (arrayOpen < 0) return true;
             System.Collections.Generic.List<string> labels = new System.Collections.Generic.List<string>();
-            foreach (object entry in array)
+            int cursor = arrayOpen + 1;
+            while (cursor < listJson.Length)
             {
-                var entryMap = entry as System.Collections.Generic.Dictionary<string, object>;
-                if (entryMap == null) continue;
-                string sid = Convert.ToString(entryMap["strategy_id"]);
-                string ver = Convert.ToString(entryMap["version"]);
-                string bid = Convert.ToString(entryMap["build_id"]);
-                string installedAt = FormatInstalledAt(Convert.ToString(entryMap["installed_at"]));
-                string artifacts = Convert.ToString(entryMap["artifact_count"]);
+                int objStart = listJson.IndexOf('{', cursor);
+                if (objStart < 0) break;
+                int objEnd = MatchClosingBrace(listJson, objStart);
+                if (objEnd < 0) break;
+                string entry = listJson.Substring(objStart, objEnd - objStart + 1);
+                string sid = ExtractJsonString(entry, "strategy_id");
+                string ver = ExtractJsonString(entry, "version");
+                string bid = ExtractJsonString(entry, "build_id");
+                if (sid.Length == 0 || ver.Length == 0 || bid.Length == 0)
+                {
+                    cursor = objEnd + 1; continue;
+                }
+                string installedAt = FormatInstalledAt(ExtractJsonString(entry, "installed_at"));
+                string artifacts = ExtractJsonString(entry, "artifact_count");
                 if (artifacts.Length > 0) artifacts = artifacts + " 个产物";
                 else artifacts = "产物数未知";
                 string label = sid + "  |  " + ver + "  |  " + bid + "  |  " + installedAt + "  |  " + artifacts;
                 labels.Add(label);
                 selections.Add(sid + "|" + ver + "|" + bid);
+                cursor = objEnd + 1;
             }
+            if (labels.Count == 0) return true;
             using (UninstallSelectionForm form = new UninstallSelectionForm(labels))
             {
                 if (form.ShowDialog() != DialogResult.OK) return false;
@@ -983,8 +993,6 @@ internal static class BigQMTAccountTray
                 selections.Clear();
                 foreach (string label in picked)
                 {
-                    // Label format: sid  |  ver  |  bid  |  installed_at  |  artifacts
-                    // Split on the 5-field separator; take the first 3.
                     string[] parts = label.Split(new string[] { "  |  " }, StringSplitOptions.None);
                     if (parts.Length < 3) continue;
                     selections.Add(parts[0] + "|" + parts[1] + "|" + parts[2]);
@@ -992,7 +1000,100 @@ internal static class BigQMTAccountTray
                 return true;
             }
         }
-        catch { return false; }
+        catch (Exception error)
+        {
+            Audit("strategy_uninstall_list_parse_error", error.GetType().Name + ": " + error.Message);
+            return false;
+        }
+    }
+
+    private static int MatchClosingBrace(string text, int openIndex)
+    {
+        // Returns index of the '}' that balances text[openIndex] == '{',
+        // honouring JSON string escapes so braces inside quoted values do
+        // not confuse the matcher.
+        int depth = 0;
+        bool inString = false; bool escape = false;
+        for (int i = openIndex; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (inString)
+            {
+                if (escape) { escape = false; continue; }
+                if (ch == '\\') { escape = true; continue; }
+                if (ch == '"') inString = false;
+                continue;
+            }
+            if (ch == '"') { inString = true; continue; }
+            if (ch == '{') depth++;
+            else if (ch == '}')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    private static string ExtractJsonString(string json, string key)
+    {
+        // Find "key" : "value" with optional whitespace; decode the standard
+        // JSON string escapes we care about.
+        string needle = "\"" + key + "\"";
+        int keyPos = json.IndexOf(needle, StringComparison.Ordinal);
+        if (keyPos < 0) return "";
+        int colon = json.IndexOf(':', keyPos + needle.Length);
+        if (colon < 0) return "";
+        int valueStart = colon + 1;
+        while (valueStart < json.Length && (json[valueStart] == ' ' || json[valueStart] == '\t')) valueStart++;
+        if (valueStart >= json.Length || json[valueStart] != '"') return "";
+        int valueEnd = valueStart + 1;
+        bool escape = false;
+        while (valueEnd < json.Length)
+        {
+            char ch = json[valueEnd];
+            if (escape) { escape = false; valueEnd++; continue; }
+            if (ch == '\\') { escape = true; valueEnd++; continue; }
+            if (ch == '"') break;
+            valueEnd++;
+        }
+        if (valueEnd >= json.Length) return "";
+        string raw = json.Substring(valueStart + 1, valueEnd - valueStart - 1);
+        System.Text.StringBuilder builder = new System.Text.StringBuilder(raw.Length);
+        for (int i = 0; i < raw.Length; i++)
+        {
+            char ch = raw[i];
+            if (ch == '\\' && i + 1 < raw.Length)
+            {
+                char next = raw[i + 1];
+                switch (next)
+                {
+                    case '"': builder.Append('"'); i++; break;
+                    case '\\': builder.Append('\\'); i++; break;
+                    case '/': builder.Append('/'); i++; break;
+                    case 'b': builder.Append('\b'); i++; break;
+                    case 'f': builder.Append('\f'); i++; break;
+                    case 'n': builder.Append('\n'); i++; break;
+                    case 'r': builder.Append('\r'); i++; break;
+                    case 't': builder.Append('\t'); i++; break;
+                    case 'u':
+                        if (i + 5 < raw.Length)
+                        {
+                            int code;
+                            if (int.TryParse(raw.Substring(i + 2, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out code))
+                            {
+                                builder.Append((char)code); i += 5;
+                            }
+                            else builder.Append(ch);
+                        }
+                        else builder.Append(ch);
+                        break;
+                    default: builder.Append(next); i++; break;
+                }
+            }
+            else builder.Append(ch);
+        }
+        return builder.ToString();
     }
 
     private static string FormatInstalledAt(string unixSeconds)
