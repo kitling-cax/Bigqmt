@@ -40,6 +40,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem coordinatorItem;
     private static ToolStripMenuItem intentItem;
     private static ToolStripMenuItem hostAgentItem;
+    private static ToolStripMenuItem strategyDeploymentItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
     private static MutexHandle mutex;
@@ -98,6 +99,8 @@ internal static class BigQMTAccountTray
     // Facts-only Host Agent delivery is deliberately separate from the
     // simulation order scheduler.  It never changes the account state/icon.
     private static DateTime nextFactDeliveryAttempt = DateTime.MinValue;
+    private static DateTime nextStrategyDeploymentAttempt = DateTime.MinValue;
+    private static string lastStrategyDeploymentState = "";
 
     [STAThread]
     private static void Main()
@@ -121,6 +124,7 @@ internal static class BigQMTAccountTray
         coordinatorItem = new ToolStripMenuItem("Coordinator：检查中（只读）"); coordinatorItem.Enabled = false; menu.Items.Add(coordinatorItem);
         intentItem = new ToolStripMenuItem("Intents：检查中（只读预览）"); intentItem.Enabled = false; menu.Items.Add(intentItem);
         hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
+        strategyDeploymentItem = new ToolStripMenuItem("策略部署：未同步（安装不启动）"); strategyDeploymentItem.Enabled = false; menu.Items.Add(strategyDeploymentItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
         services.DropDownItems.Add("启动缺失的 QMT", null, delegate { StartQmt(false); });
@@ -131,6 +135,7 @@ internal static class BigQMTAccountTray
         services.DropDownItems.Add("确保本地看板运行", null, delegate { EnsureDashboard(); });
         services.DropDownItems.Add("立即探测 Bridge（只读）", null, delegate { ProbeBridge(); });
         services.DropDownItems.Add("立即同步 Host Agent（只读）", null, delegate { HostAgentSyncNow(); });
+        services.DropDownItems.Add("立即拉取策略安装请求（不启动）", null, delegate { StrategyDeploymentIfDue(DateTime.Now, true); });
         menu.Items.Add(services);
         menu.Items.Add("打开看板", null, delegate { OpenDashboard(); });
         menu.Items.Add("打开本账户日志", null, delegate { OpenLogs(); });
@@ -391,6 +396,8 @@ internal static class BigQMTAccountTray
         bridgeItem.Text = "Bridge：" + bridgeState + "｜快照 " + runtimeHealth;
         dashboardItem.Text = "Dashboard：" + (dashboard ? "正常" : "不可达（将自动补拉）") + "（端口 " + DashboardPort + "）";
         hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
+        if (strategyDeploymentItem != null && lastStrategyDeploymentState.Length > 0)
+            strategyDeploymentItem.Text = "策略部署：" + lastStrategyDeploymentState + "（安装不启动）";
         RefreshCoordinatorPreview();
         RefreshCoordinatorIntentPreview();
         string tip = ProfileTitle + " " + Account + "｜" + state;
@@ -474,6 +481,34 @@ internal static class BigQMTAccountTray
                 Audit("host_agent_manual_sync_error", error.GetType().Name + ": " + error.Message);
             }
         });
+    }
+
+    private static void StrategyDeploymentIfDue(DateTime now, bool manual)
+    {
+        if (!manual && now < nextStrategyDeploymentAttempt) return;
+        nextStrategyDeploymentAttempt = now.AddSeconds(30);
+        bool ok;
+        string output = RunPython("poll_strategy_deployments.py", "--once", 45000, out ok);
+        string state;
+        if (output.IndexOf("\"status\": \"ok\"") >= 0)
+        {
+            int marker = output.IndexOf("\"deployments\":", StringComparison.Ordinal);
+            if (marker >= 0) state = output.IndexOf("\"status\": \"INSTALLED\"") >= 0 ? "已安装（未启动）" : "无待安装请求";
+            else state = "拉取完成";
+        }
+        else if (output.IndexOf("library_root is not configured", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            state = "等待本机策略库配置";
+        }
+        else
+        {
+            state = "拉取失败（保留订单锁）";
+        }
+        if (manual || state != lastStrategyDeploymentState)
+            Audit("strategy_deployment_poll", state + "; orders_enabled=false; run_after_install=false");
+        lastStrategyDeploymentState = state;
+        if (strategyDeploymentItem != null)
+            strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
     }
 
     private static void RefreshCoordinatorPreview()
@@ -847,6 +882,7 @@ internal static class BigQMTAccountTray
         HourlySnapshotIfDue(now);
         BridgeDailyRecordIfDue(now, today);
         HostFactDeliveryIfDue(now);
+        StrategyDeploymentIfDue(now, false);
         if (Profile != "simulation") return;
         CloseShadowIfDue(now, today);
         LakeCycleIfDue(now, today);

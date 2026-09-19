@@ -177,6 +177,16 @@ def test_fleet_endpoint_is_readonly_projection_no_intents():
     assert "intents" not in payload
 
 
+def test_strategy_candidate_catalog_is_readonly(tmp_path, monkeypatch):
+    monkeypatch.setenv("BIGQMT_STRATEGY_LIBRARY_ROOT", str(tmp_path / "missing"))
+    code, payload = serve.response_payload("/api/v1/strategy-candidates")
+    assert code == 200
+    assert payload["readonly"] is True
+    assert payload["orders_enabled"] is False
+    assert payload["push_supported"] is False
+    assert payload["candidates"] == []
+
+
 def test_bootstrap_does_not_expose_fact_ingest_or_any_order_write_route():
     for path in ("/api/v1/facts/ingest", "/api/v1/orders", "/api/v1/leases"):
         code, payload = serve.response_payload(path)
