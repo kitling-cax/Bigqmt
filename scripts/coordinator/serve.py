@@ -26,6 +26,7 @@ from kitling_bigqmt.coordinator_instance import (  # noqa: E402
 )
 from kitling_bigqmt.host_fact_identity import trusted_hosts_from_file  # noqa: E402
 from kitling_bigqmt.coordinator_fact_ingress import CoordinatorFactIngress  # noqa: E402
+from kitling_bigqmt.strategy_catalog import catalog_html, list_candidates, preview_push  # noqa: E402
 
 HOST = os.environ.get("BIGQMT_COORDINATOR_BIND", "127.0.0.1")
 PORT = int(os.environ.get("BIGQMT_COORDINATOR_PORT", "18443"))
@@ -326,6 +327,8 @@ def response_payload(path: str) -> tuple[int, dict]:
             "overall_verified_percent": snapshot.get("overall_verified_percent"),
             "updated_at": snapshot.get("updated_at"),
         }
+    if path == "/api/v1/strategy-candidates":
+        return 200, list_candidates(ROOT)
     if path == "/api/v1/executor-preview":
         return 200, executor_preview()
     if path == "/api/v1/fleet":
@@ -368,6 +371,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
+        if path == "/strategies":
+            encoded = catalog_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         if path == "/api/v1/host-agent/intents":
             query = parse_qs(split.query, keep_blank_values=True)
             code, body = host_agent_intent_preview(
@@ -383,6 +394,38 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_POST(self) -> None:  # noqa: N802
+        if urlsplit(self.path).path == "/api/v1/strategy-push-preview":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 64 * 1024:
+                    raise ValueError("invalid preview request size")
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError("preview request must be an object")
+                body = preview_push(
+                    ROOT,
+                    str(payload.get("strategy_id", "")),
+                    str(payload.get("version", "")),
+                    str(payload.get("build_id", "")),
+                    payload.get("target_host_ids", []),
+                    _live_hosts_snapshot(),
+                )
+                code = 200
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                code, body = 400, {
+                    "status": "rejected",
+                    "readonly": True,
+                    "orders_enabled": False,
+                    "reason": str(exc),
+                    "control": "PREVIEW_ONLY_NO_ASSIGNMENT_OR_INSTALL_WRITE",
+                }
+            encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         if urlsplit(self.path).path == "/api/v1/facts/ingest":
             try:
                 ingress = fact_ingress_from_environment()
