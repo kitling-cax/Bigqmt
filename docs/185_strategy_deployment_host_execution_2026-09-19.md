@@ -12,6 +12,13 @@
   - `.125`：`host/125/structure`
   - `.113`：`host/113/structure`
 
+## 2026-09-20 并发轮询修复
+
+请再次合并 `origin/feature/strategy-deployment`（包含提交
+`41874d3 fix: serialize host strategy deployment polling`）并重新编译。
+该修复增加本机跨进程锁，避免模拟/正式托盘同时安装同一个策略包导致
+`WinError 5`。第二个托盘会显示“其他托盘正在拉取”，不会重复安装或改变订单权限。
+
 ## Claude 执行步骤（两台机器分别执行）
 
 ```powershell
