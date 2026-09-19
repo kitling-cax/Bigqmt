@@ -7,6 +7,8 @@ $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $csc)) { throw "C# compiler unavailable: $csc" }
 $source = Join-Path $ProjectRoot 'tray\BigQMTAccountTray.cs'
+$normalizer = Join-Path $ProjectRoot 'scripts\normalize_native_pe.py'
+if (-not (Test-Path -LiteralPath $normalizer)) { throw "PE normalizer unavailable: $normalizer" }
 & py -3.12 (Join-Path $ProjectRoot 'scripts\generate_native_tray_icons.py')
 if ($LASTEXITCODE -ne 0) { throw 'native tray icon generation failed' }
 foreach ($item in @(
@@ -16,7 +18,9 @@ foreach ($item in @(
   $output = Join-Path $ProjectRoot ('tray\' + $item.Name)
   $icon = Join-Path $ProjectRoot ('tray\' + $item.Icon)
     & $csc /nologo /target:winexe /optimize+ /define:$($item.Define) /win32icon:$icon /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /out:$output $source
-  if ($LASTEXITCODE -ne 0) { throw "compile failed: $($item.Name)" }
+    if ($LASTEXITCODE -ne 0) { throw "compile failed: $($item.Name)" }
+    & py -3.12 $normalizer $output
+    if ($LASTEXITCODE -ne 0) { throw "PE normalization failed: $($item.Name)" }
 }
 
 $manifest = foreach ($name in 'BigQMT_Simulation.exe', 'BigQMT_Production_ReadOnly.exe') {

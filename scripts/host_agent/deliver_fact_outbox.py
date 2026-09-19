@@ -47,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--outbox-path", type=Path, required=True)
     parser.add_argument("--endpoint", required=True)
+    parser.add_argument("--expected-host-id", default="", help="local machine host_id; blocks a mismatched Fact Secret")
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--allow-non-shadow", action="store_true", help="explicitly permit a non-18666 endpoint")
     args = parser.parse_args(argv)
@@ -56,6 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     credentials = load_credentials(args.secret_file)
     if len(credentials) != 1:
         raise SystemExit("exactly one active fact identity is required for this Host Agent")
+    expected_host_id = str(args.expected_host_id or "").strip()
+    if expected_host_id and credentials[0].host_id != expected_host_id:
+        print(json.dumps({
+            "status": "FACT_HOST_ID_MISMATCH",
+            "expected_host_id": expected_host_id,
+            "secret_host_id": credentials[0].host_id,
+            "orders_enabled": False,
+            "facts_only": True,
+        }, ensure_ascii=False))
+        return 3
     outbox = LocalOutbox(args.outbox_path)
     envelope, event_ids = build_pending_envelope(outbox, credentials[0], ttl_seconds=60)
     if envelope is None:

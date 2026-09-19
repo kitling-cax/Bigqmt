@@ -57,7 +57,9 @@ if (-not $created) {
 $auditDir = Join-Path $ProjectRoot ("runtime_data\audit\" + $Profile)
 $auditPath = Join-Path $auditDir 'tray_events.jsonl'
 $redisConfigName = if ($Profile -eq 'simulation') { 'redis-simulation.conf' } else { 'redis-production.conf' }
-$redisConfigPath = Join-Path $ProjectRoot ("config\redis\" + $redisConfigName)
+$redisTemplatePath = Join-Path $ProjectRoot ("config\redis\" + $redisConfigName)
+$redisRuntimeDir = Join-Path $ProjectRoot ("runtime_data\redis\" + $Profile)
+$redisConfigPath = Join-Path $redisRuntimeDir 'redis-autostart.conf'
 $redisExecutable = Join-Path $ProjectRoot 'runtime_data\redis\_package_inspect\Redis-8.10.1-Windows-x64-msys2\redis-server.exe'
 $redisPort = if ($Profile -eq 'simulation') { 6379 } else { 6380 }
 $strategyRuntimePolicyPath = Join-Path $ProjectRoot 'config\strategy_runtime_policy.json'
@@ -226,11 +228,25 @@ function ConvertTo-MsysPath([string]$WindowsPath) {
   if ($WindowsPath -notmatch '^([A-Za-z]):[\\/](.*)$') { throw "cannot convert non-drive path to MSYS path: $WindowsPath" }
   return '/cygdrive/' + $matches[1].ToLowerInvariant() + '/' + ($matches[2] -replace '\\','/')
 }
+function Materialize-RedisConfig {
+  if (-not (Test-Path -LiteralPath $redisTemplatePath)) { return $false }
+  try {
+    New-Item -ItemType Directory -Force -Path $redisRuntimeDir | Out-Null
+    $rootMsys = ConvertTo-MsysPath $ProjectRoot
+    $text = Get-Content -LiteralPath $redisTemplatePath -Raw -Encoding UTF8
+    $text = $text.Replace('C:/BigQMT/work/kitling_bigqmt', $rootMsys).Replace('C:\BigQMT\work\kitling_bigqmt', $rootMsys)
+    [IO.File]::WriteAllText($redisConfigPath, $text, (New-Object Text.UTF8Encoding($false)))
+    return $true
+  } catch {
+    Write-TrayEvent 'redis_config_materialize_error' $_.Exception.Message
+    return $false
+  }
+}
 function Ensure-Redis {
   # Only start a missing profile-local Redis listener. It never kills a
   # process, restarts QMT, writes to an account, or changes the order lock.
   if (Test-LocalTcpPort $redisPort) { return $true }
-  if (-not (Test-Path -LiteralPath $redisExecutable) -or -not (Test-Path -LiteralPath $redisConfigPath)) {
+  if (-not (Test-Path -LiteralPath $redisExecutable) -or -not (Materialize-RedisConfig)) {
     Write-TrayEvent 'redis_start_blocked' "missing executable or config for port $redisPort"
     return $false
   }

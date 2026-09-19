@@ -910,7 +910,14 @@ internal static class BigQMTAccountTray
             return;
         }
         bool delivered;
-        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --endpoint \"" + ShadowCoordinatorEndpoint() + "\"", 20000, out delivered);
+        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --expected-host-id \"" + HostId() + "\" --endpoint \"" + ShadowCoordinatorEndpoint() + "\"", 20000, out delivered);
+        if (deliver.IndexOf("FACT_HOST_ID_MISMATCH", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            hostAgentState = "Fact Secret 不匹配";
+            hostAgentDetail = "Secret host_id 与本机 host_id 不一致";
+            Audit("host_fact_delivery_blocked", deliver.TrimStart());
+            return;
+        }
         hostAgentState = delivered ? "事实投递正常" : "事实待重试";
         hostAgentDetail = delivered ? "Outbox已确认" : "Outbox保留待补传";
         Audit(delivered ? "host_fact_delivery" : "host_fact_delivery_retry_pending", deliver.TrimStart());
