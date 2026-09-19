@@ -51,3 +51,27 @@ def test_defaults_to_disabled_for_unknown_strategy(tmp_path: Path):
     policy.main(["--strategy-id", "OTHER_ID", "--enabled", "false"])
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["simulation"]["strategies"]["OTHER_ID"]["auto_run_enabled"] is False
+
+
+def test_clear_removes_entry_and_resets_legacy_v1115(tmp_path: Path):
+    path = _install(tmp_path)
+    (path.parent).mkdir(parents=True)
+    policy._write({"schema_version": 1, "simulation": {}, "production": {}})
+    policy.main(["--strategy-id", "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15", "--enabled", "true"])
+    policy.main(["--strategy-id", "S99_DEMO_5D_SIM_MAIN_V1_0_0", "--enabled", "true"])
+    # clear the S10 v1.1.15 entry: legacy key must also go false
+    assert policy.main(["--strategy-id", "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15", "--clear"]) == 0
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15" not in data["simulation"]["strategies"]
+    assert data["simulation"]["strategies"]["S99_DEMO_5D_SIM_MAIN_V1_0_0"]["auto_run_enabled"] is True
+    assert data["simulation"]["v1_1_15_auto_run_enabled"] is False
+
+
+def test_clear_requires_exactly_one_mode(tmp_path: Path):
+    _install(tmp_path)
+    # both --enabled and --clear -> SystemExit from argparse
+    import pytest
+    with pytest.raises(SystemExit):
+        policy.main(["--strategy-id", "X", "--enabled", "true", "--clear"])
+    with pytest.raises(SystemExit):
+        policy.main(["--strategy-id", "X"])

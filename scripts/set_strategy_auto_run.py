@@ -53,27 +53,51 @@ def _safe_strategy_id(value: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Toggle one strategy's local auto-run switch")
+    parser = argparse.ArgumentParser(description="Toggle or clear one strategy's local auto-run switch")
     parser.add_argument("--strategy-id", required=True)
-    parser.add_argument("--enabled", choices=("true", "false"), required=True)
+    parser.add_argument("--enabled", choices=("true", "false"),
+                        help="set the per-strategy switch; mutually exclusive with --clear")
+    parser.add_argument("--clear", action="store_true",
+                        help="remove the strategy's switch entry (uninstall path); resets the v1.1.15 legacy key if the id is v1.1.15")
     parser.add_argument("--profile", choices=("simulation",), default="simulation",
                         help="per-strategy auto-run toggles are simulation-only")
     args = parser.parse_args(argv)
-    enabled = args.enabled == "true"
-    try:
-        strategy_id = _safe_strategy_id(args.strategy_id)
-    except ValueError as exc:
-        print(json.dumps({"ok": False, "reason": str(exc), "orders_enabled": False}, ensure_ascii=False))
-        return 2
+    if args.clear == bool(args.enabled):
+        parser.error("exactly one of --enabled or --clear is required")
 
     value = _load()
     value.setdefault("schema_version", 1)
     value.setdefault("simulation", {})
     value.setdefault("production", {})
     simulation = value["simulation"]
-    strategies = simulation.setdefault("strategies", {})
+
+    try:
+        strategy_id = _safe_strategy_id(args.strategy_id)
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "reason": str(exc), "orders_enabled": False}, ensure_ascii=False))
+        return 2
+
+    strategies = simulation.get("strategies")
     if not isinstance(strategies, dict):
         strategies = {}
+
+    if args.clear:
+        existed = strategies.pop(strategy_id, None) is not None
+        if strategy_id == LEGACY_V1_1_15 and simulation.get("v1_1_15_auto_run_enabled") is not None:
+            simulation["v1_1_15_auto_run_enabled"] = False
+        simulation["strategies"] = strategies
+        _write(value)
+        print(json.dumps({
+            "ok": True,
+            "profile": args.profile,
+            "strategy_id": strategy_id,
+            "cleared": True,
+            "existed": existed,
+            "orders_enabled": False,
+        }, ensure_ascii=False))
+        return 0
+
+    enabled = args.enabled == "true"
     entry = strategies.get(strategy_id)
     if not isinstance(entry, dict):
         entry = {}

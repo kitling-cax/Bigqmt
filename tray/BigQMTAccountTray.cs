@@ -1037,7 +1037,19 @@ internal static class BigQMTAccountTray
         {
             string args = "--strategy-id \"" + entry["strategy_id"] + "\" --version \"" + entry["version"] + "\" --build-id \"" + entry["build_id"] + "\"";
             bool itemOk; string output = RunPython("uninstall_strategy_package.py", args, 30000, out itemOk);
-            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0) { removed++; Audit("strategy_uninstalled", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"] + "; orders_enabled=false; run_after_install=false"); }
+            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0)
+            {
+                removed++;
+                Audit("strategy_uninstalled", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"] + "; orders_enabled=false; run_after_install=false");
+                // Clear the per-strategy run switch so a deleted strategy is
+                // also off in policy (fail-closed; a re-install starts disabled).
+                if (Profile == "simulation")
+                {
+                    bool clearOk; string clearOut = RunPython("set_strategy_auto_run.py", "--strategy-id \"" + entry["strategy_id"] + "\" --clear", 5000, out clearOk);
+                    if (clearOk) Audit("strategy_policy_cleared", entry["strategy_id"]);
+                    else Audit("strategy_policy_clear_error", entry["strategy_id"] + ": " + clearOut);
+                }
+            }
             else if (output.IndexOf("\"status\": \"not_found\"") >= 0) { missing++; Audit("strategy_uninstall_missing", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"]); }
             else
             {
