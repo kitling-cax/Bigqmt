@@ -516,6 +516,10 @@ internal static class BigQMTAccountTray
         lastStrategyDeploymentState = state;
         if (strategyDeploymentItem != null)
             strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
+        // Hide the v1.1.15 auto-run policy toggle when nothing is installed:
+        // the toggle is meaningless without a deployed strategy to run.
+        if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = localInstalled > 0;
     }
 
     private static int LocalInstalledCount()
@@ -886,6 +890,7 @@ internal static class BigQMTAccountTray
         }
         if (selections.Count == 0)
         {
+            MessageBox.Show("未勾选任何条目。取消本次删除。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             Audit("strategy_uninstall_cancelled", "empty_selection");
             return;
         }
@@ -927,7 +932,9 @@ internal static class BigQMTAccountTray
         lastStrategyDeploymentState = state;
         if (strategyDeploymentItem != null)
             strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
-        Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false");
+        if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = localInstalled > 0;
+        Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false; visible=" + (localInstalled > 0));
     }
 
     private static bool PromptPassword(string title, string label, out string password)
@@ -1412,49 +1419,51 @@ internal static class BigQMTAccountTray
         private readonly Label counter;
         public UninstallSelectionForm(System.Collections.Generic.IList<string> labels)
         {
-            Text = "选择要删除的已安装策略（共 " + labels.Count + " 条）";
+            Text = "选择要删除的已安装策略（共 " + labels.Count + " 条，默认全勾）";
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             MinimizeBox = false; ShowInTaskbar = false;
-            ClientSize = new Size(720, 360);
+            ClientSize = new Size(760, 380);
             Label hint = new Label();
-            hint.Text = "勾选要删除的条目（每行：strategy_id  |  version  |  build_id  |  安装时间  |  产物数）：";
+            hint.Text = "行首的小方框 [ ] 是勾选框。点方框或点文字都会切换勾选状态。\n" +
+                        "默认全勾，要保留哪个就取消勾选哪个。然后点「删除选中」。";
             hint.AutoSize = true;
             hint.Location = new Point(12, 8);
             list = new CheckedListBox();
-            list.Location = new Point(12, 32);
-            list.Size = new Size(696, 240);
+            list.Location = new Point(12, 48);
+            list.Size = new Size(736, 240);
             list.CheckOnClick = true;
             list.IntegralHeight = false;
-            foreach (string label in labels) list.Items.Add(label, false);
+            list.Font = new System.Drawing.Font("Consolas", 10F);
+            foreach (string label in labels) list.Items.Add("[☐] " + label, true);
             counter = new Label();
             counter.AutoSize = true;
-            counter.Location = new Point(12, 280);
-            counter.Text = "已选 0 / " + labels.Count + " 条";
+            counter.Location = new Point(12, 296);
+            counter.Text = "已选 " + labels.Count + " / " + labels.Count + " 条（全勾）";
             list.ItemCheck += delegate { counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
             Button all = new Button();
             all.Text = "全选";
-            all.Location = new Point(12, 312);
+            all.Location = new Point(12, 328);
             all.AutoSize = true;
             all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); counter.Text = "已选 " + list.Items.Count + " / " + labels.Count + " 条"; };
             Button none = new Button();
             none.Text = "全不选";
-            none.Location = new Point(80, 312);
+            none.Location = new Point(80, 328);
             none.AutoSize = true;
             none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); counter.Text = "已选 0 / " + labels.Count + " 条"; };
             Button invert = new Button();
             invert.Text = "反选";
-            invert.Location = new Point(160, 312);
+            invert.Location = new Point(160, 328);
             invert.AutoSize = true;
             invert.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, !list.GetItemChecked(i)); counter.Text = "已选 " + list.CheckedItems.Count + " / " + labels.Count + " 条"; };
             Button ok = new Button();
             ok.Text = "删除选中";
-            ok.Location = new Point(480, 312);
+            ok.Location = new Point(520, 328);
             ok.AutoSize = true;
             ok.DialogResult = DialogResult.OK;
             Button cancel = new Button();
             cancel.Text = "取消";
-            cancel.Location = new Point(620, 312);
+            cancel.Location = new Point(660, 328);
             cancel.AutoSize = true;
             cancel.DialogResult = DialogResult.Cancel;
             AcceptButton = ok; CancelButton = cancel;
@@ -1465,8 +1474,12 @@ internal static class BigQMTAccountTray
             System.Collections.Generic.List<string> picked = new System.Collections.Generic.List<string>();
             foreach (object item in list.CheckedItems)
             {
-                string label = item as string;
-                if (label != null) picked.Add(label);
+                string raw = item as string;
+                if (raw == null) continue;
+                // Strip the "[ ] " / "[x] " prefix so the caller can split on "  |  ".
+                if (raw.StartsWith("[☐] ")) raw = raw.Substring(4);
+                else if (raw.StartsWith("[☑] ")) raw = raw.Substring(4);
+                picked.Add(raw);
             }
             return picked;
         }
