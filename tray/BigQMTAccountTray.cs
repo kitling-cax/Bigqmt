@@ -6,6 +6,7 @@ using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -148,6 +149,7 @@ internal static class BigQMTAccountTray
         strategyPolicyItem.CheckOnClick = true;
         strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
         menu.Items.Add(strategyPolicyItem);
+        menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
         menu.Items.Add("刷新全部状态", null, delegate { RefreshStatus(); });
         menu.Items.Add("锁定订单状态", null, delegate { LockReminder(); });
         menu.Items.Add(new ToolStripSeparator());
@@ -822,6 +824,138 @@ internal static class BigQMTAccountTray
         Audit("strategy_policy", enabled ? "enabled" : "disabled");
     }
 
+    private static void UninstallInstalledStrategies()
+    {
+        string expectedHash = NestedConfigString(LoadMachineLocal(), "tray", "delete_strategy_password_sha256").ToLowerInvariant();
+        if (expectedHash.Length != 64)
+        {
+            MessageBox.Show("未配置删除密码散列（tray.delete_strategy_password_sha256）。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_blocked", "missing_password_hash");
+            return;
+        }
+        string password;
+        if (!PromptPassword("删除已安装策略", "输入托盘删除密码：", out password) || password.Length == 0)
+        {
+            Audit("strategy_uninstall_cancelled", "user_cancelled");
+            return;
+        }
+        string attemptHash = Sha256Hex(password);
+        if (attemptHash != expectedHash)
+        {
+            MessageBox.Show("密码错误。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_blocked", "bad_password");
+            return;
+        }
+
+        bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (!ok)
+        {
+            MessageBox.Show("无法列出已安装策略：\n" + listed, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_list_error", listed);
+            return;
+        }
+        System.Collections.Generic.List<string> selections = new System.Collections.Generic.List<string>();
+        string installRoot = "";
+        if (!PromptStrategySelection(listed, out installRoot, selections))
+        {
+            Audit("strategy_uninstall_cancelled", "no_selection");
+            return;
+        }
+        if (selections.Count == 0)
+        {
+            Audit("strategy_uninstall_cancelled", "empty_selection");
+            return;
+        }
+        if (MessageBox.Show("将永久删除本机以下已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" + string.Join("\n", selections.ToArray()) + "\n\n确认继续？", ProfileTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+        {
+            Audit("strategy_uninstall_cancelled", "user_declined_confirmation");
+            return;
+        }
+
+        int removed = 0; int missing = 0; System.Text.StringBuilder errors = new System.Text.StringBuilder();
+        foreach (string item in selections)
+        {
+            string[] parts = item.Split('|');
+            if (parts.Length != 3) continue;
+            string args = "--strategy-id \"" + parts[0] + "\" --version \"" + parts[1] + "\" --build-id \"" + parts[2] + "\" --install-root \"" + installRoot + "\"";
+            bool itemOk; string output = RunPython("uninstall_strategy_package.py", args, 30000, out itemOk);
+            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0) { removed++; Audit("strategy_uninstalled", item + "; orders_enabled=false; run_after_install=false"); }
+            else if (output.IndexOf("\"status\": \"not_found\"") >= 0) { missing++; Audit("strategy_uninstall_missing", item); }
+            else
+            {
+                errors.Append(item).Append(" → ").Append(output).Append("\n");
+                Audit("strategy_uninstall_error", item + ": " + output);
+            }
+        }
+        string summary = "删除完成：成功 " + removed + " 条" + (missing > 0 ? "，目标已不存在 " + missing + " 条" : "") + (errors.Length > 0 ? "，失败 " + errors.Length + " 条" : "");
+        MessageBox.Show(summary + (errors.Length > 0 ? "\n\n失败详情：\n" + errors.ToString() : ""), ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (removed > 0) RefreshStatus();
+    }
+
+    private static bool PromptPassword(string title, string label, out string password)
+    {
+        password = "";
+        using (PasswordPromptForm form = new PasswordPromptForm(title, label))
+        {
+            return form.ShowDialog() == DialogResult.OK && form.EnteredPassword(out password);
+        }
+    }
+
+    private static bool PromptStrategySelection(string listJson, out string installRoot, System.Collections.Generic.List<string> selections)
+    {
+        installRoot = ""; selections = new System.Collections.Generic.List<string>();
+        try
+        {
+            object parsed = new JavaScriptSerializer().DeserializeObject(listJson);
+            var root = parsed as System.Collections.Generic.Dictionary<string, object>;
+            if (root == null) return false;
+            object rootValue;
+            if (root.TryGetValue("install_root", out rootValue)) installRoot = Convert.ToString(rootValue);
+            object items;
+            if (!root.TryGetValue("installed", out items)) return true;
+            var array = items as System.Collections.Generic.List<object>;
+            if (array == null || array.Count == 0) return true;
+            System.Collections.Generic.List<string> labels = new System.Collections.Generic.List<string>();
+            foreach (object entry in array)
+            {
+                var entryMap = entry as System.Collections.Generic.Dictionary<string, object>;
+                if (entryMap == null) continue;
+                string sid = Convert.ToString(entryMap["strategy_id"]);
+                string ver = Convert.ToString(entryMap["version"]);
+                string bid = Convert.ToString(entryMap["build_id"]);
+                labels.Add(sid + "  |  " + ver + "  |  " + bid);
+                selections.Add(sid + "|" + ver + "|" + bid);
+            }
+            using (UninstallSelectionForm form = new UninstallSelectionForm(labels))
+            {
+                if (form.ShowDialog() != DialogResult.OK) return false;
+                System.Collections.Generic.List<string> picked = form.SelectedLabels();
+                selections.Clear();
+                foreach (string label in picked)
+                {
+                    int sep1 = label.IndexOf("  |  "); if (sep1 < 0) continue;
+                    int sep2 = label.IndexOf("  |  ", sep1 + 5); if (sep2 < 0) continue;
+                    string sid = label.Substring(0, sep1);
+                    string ver = label.Substring(sep1 + 5, sep2 - sep1 - 5);
+                    string bid = label.Substring(sep2 + 5);
+                    selections.Add(sid + "|" + ver + "|" + bid);
+                }
+                return true;
+            }
+        }
+        catch { return false; }
+    }
+
+    private static string Sha256Hex(string text)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(text ?? "");
+        byte[] hash;
+        using (SHA256 sha = SHA256.Create()) hash = sha.ComputeHash(bytes);
+        System.Text.StringBuilder builder = new System.Text.StringBuilder(hash.Length * 2);
+        foreach (byte b in hash) builder.Append(b.ToString("x2"));
+        return builder.ToString();
+    }
+
     private static void LockReminder()
     {
         MessageBox.Show("订单锁保持开启。正式账户永久只读；模拟账户的策略开关本身不直接下单。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1180,5 +1314,96 @@ internal static class BigQMTAccountTray
         public readonly bool IsFirstInstance;
         public MutexHandle(string name) { inner = new System.Threading.Mutex(true, name, out IsFirstInstance); }
         public void Dispose() { if (IsFirstInstance) inner.ReleaseMutex(); inner.Dispose(); }
+    }
+
+    private sealed class PasswordPromptForm : Form
+    {
+        private readonly TextBox input;
+        public PasswordPromptForm(string title, string label)
+        {
+            Text = title;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterScreen;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
+            ClientSize = new Size(360, 110);
+            Label prompt = new Label();
+            prompt.Text = label;
+            prompt.AutoSize = true;
+            prompt.Location = new Point(12, 12);
+            input = new TextBox();
+            input.Location = new Point(12, 40);
+            input.Width = 336;
+            input.UseSystemPasswordChar = true;
+            Button ok = new Button();
+            ok.Text = "确定";
+            ok.Location = new Point(212, 72);
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(286, 72);
+            cancel.DialogResult = DialogResult.Cancel;
+            AcceptButton = ok; CancelButton = cancel;
+            Controls.Add(prompt); Controls.Add(input); Controls.Add(ok); Controls.Add(cancel);
+        }
+        public bool EnteredPassword(out string password)
+        {
+            password = input.Text ?? "";
+            return password.Length > 0;
+        }
+    }
+
+    private sealed class UninstallSelectionForm : Form
+    {
+        private readonly CheckedListBox list;
+        public UninstallSelectionForm(System.Collections.Generic.IList<string> labels)
+        {
+            Text = "选择要删除的已安装策略";
+            FormBorderStyle = FormBorderStyle.Sizable;
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimizeBox = false; ShowInTaskbar = false;
+            ClientSize = new Size(520, 320);
+            Label hint = new Label();
+            hint.Text = "勾选要删除的条目（每个条目 = strategy_id / version / build_id）：";
+            hint.AutoSize = true;
+            hint.Location = new Point(12, 8);
+            list = new CheckedListBox();
+            list.Location = new Point(12, 32);
+            list.Size = new Size(496, 220);
+            list.CheckOnClick = true;
+            list.IntegralHeight = false;
+            foreach (string label in labels) list.Items.Add(label, false);
+            Button all = new Button();
+            all.Text = "全选";
+            all.Location = new Point(12, 260);
+            all.AutoSize = true;
+            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true); };
+            Button none = new Button();
+            none.Text = "全不选";
+            none.Location = new Point(80, 260);
+            none.AutoSize = true;
+            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false); };
+            Button ok = new Button();
+            ok.Text = "删除选中";
+            ok.Location = new Point(310, 260);
+            ok.AutoSize = true;
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(420, 260);
+            cancel.AutoSize = true;
+            cancel.DialogResult = DialogResult.Cancel;
+            AcceptButton = ok; CancelButton = cancel;
+            Controls.Add(hint); Controls.Add(list); Controls.Add(all); Controls.Add(none); Controls.Add(ok); Controls.Add(cancel);
+        }
+        public System.Collections.Generic.List<string> SelectedLabels()
+        {
+            System.Collections.Generic.List<string> picked = new System.Collections.Generic.List<string>();
+            foreach (object item in list.CheckedItems)
+            {
+                string label = item as string;
+                if (label != null) picked.Add(label);
+            }
+            return picked;
+        }
     }
 }
