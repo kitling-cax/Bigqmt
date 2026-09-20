@@ -29,7 +29,14 @@ def main() -> int:
         timeout_seconds=float(config.get("rpc_timeout_seconds", 12)),
     )
     bundle = collect_readonly_snapshot(client, list(config.get("quote_codes") or []))
-    store = RuntimeStateStore(Path(config["state_db"]), Path(config["audit_dir"]))
+    # The explicit gateway file carries portable defaults, while
+    # machine.local.json is authoritative for the host's relocated data root.
+    # Use the effective loader for persistence paths so an explicit `--config`
+    # cannot accidentally write a second stale state/ tree beside the project.
+    effective = load_gateway(ROOT, "simulation")
+    state_db = Path(str(effective.get("state_db") or ROOT / "runtime_data" / "state" / "simulation" / "qmt_runtime.sqlite3"))
+    audit_dir = Path(str(effective.get("audit_dir") or ROOT / "runtime_data" / "audit" / "simulation"))
+    store = RuntimeStateStore(state_db, audit_dir)
     run_id = store.record_snapshot(str(config["environment"]), str(config["account_id"]), bundle)
     data = bundle["asset"].get("data") or {}
     print(json.dumps({
