@@ -1,4 +1,4 @@
-"""Submit exactly one preflighted v1.1.15 simulation entry, then re-lock.
+"""Submit exactly one preflighted v1.1.15 simulation entry.
 
 This is a migration/activation tool, not the long-running strategy executor.
 It accepts no account, code, quantity, or price arguments.  The only possible

@@ -12,8 +12,7 @@ deliberately narrow:
     not part of the current milestone.
 
 Nothing here talks to Redis, QMT, or a broker.  The gate can only deny; the
-caller keeps ownership of the actual submit, its idempotency claim, and the
-finally re-lock.
+  caller keeps ownership of the actual submit and its idempotency claim.
 """
 from __future__ import annotations
 
