@@ -43,6 +43,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem intentItem;
     private static ToolStripMenuItem hostAgentItem;
     private static ToolStripMenuItem strategyDeploymentItem;
+    private static ToolStripMenuItem authorizationKeyItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
     private static ToolStripMenuItem strategyPolicyMenu;
@@ -104,6 +105,7 @@ internal static class BigQMTAccountTray
     private static DateTime nextFactDeliveryAttempt = DateTime.MinValue;
     private static DateTime nextStrategyDeploymentAttempt = DateTime.MinValue;
     private static string lastStrategyDeploymentState = "";
+    private static string lastAuthorizationKeyState = "";
 
     [STAThread]
     private static void Main()
@@ -128,6 +130,7 @@ internal static class BigQMTAccountTray
         intentItem = new ToolStripMenuItem("Intents：检查中（只读预览）"); intentItem.Enabled = false; menu.Items.Add(intentItem);
         hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
         strategyDeploymentItem = new ToolStripMenuItem("策略部署：未同步（安装不启动）"); strategyDeploymentItem.Enabled = false; menu.Items.Add(strategyDeploymentItem);
+        authorizationKeyItem = new ToolStripMenuItem("下单授权 Key：检查中"); authorizationKeyItem.Enabled = false; menu.Items.Add(authorizationKeyItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
         services.DropDownItems.Add("启动缺失的 QMT", null, delegate { StartQmt(false); });
@@ -140,6 +143,12 @@ internal static class BigQMTAccountTray
         services.DropDownItems.Add("立即同步 Host Agent（只读）", null, delegate { HostAgentSyncNow(); });
         services.DropDownItems.Add("立即拉取策略安装请求（不启动）", null, delegate { StrategyDeploymentIfDue(DateTime.Now, true); });
         menu.Items.Add(services);
+        ToolStripMenuItem keyMenu = new ToolStripMenuItem("下单授权 Key 管理");
+        keyMenu.DropDownItems.Add("查看本账户 Key 状态", null, delegate { ShowAuthorizationKeyStatus(); });
+        keyMenu.DropDownItems.Add("加入本账户授权 Key", null, delegate { InstallAuthorizationKey(); });
+        keyMenu.DropDownItems.Add("设置/修改托盘删除密码", null, delegate { ConfigureDeletePassword(); });
+        keyMenu.DropDownItems.Add("删除本账户授权 Key", null, delegate { DeleteAuthorizationKey(); });
+        menu.Items.Add(keyMenu);
         menu.Items.Add("打开看板", null, delegate { OpenDashboard(); });
         menu.Items.Add("打开本账户日志", null, delegate { OpenLogs(); });
         menu.Items.Add("生成诊断报告", null, delegate { GenerateDiagnosis(); });
@@ -190,6 +199,7 @@ internal static class BigQMTAccountTray
         windowsStartupItem.Checked = WindowsStartupEnabled();
         if (Profile == "simulation") RebuildStrategyPolicyMenu();
         else strategyPolicyItem.Checked = StrategyPolicyEnabled();
+        RefreshAuthorizationKeyStatus();
         RefreshStatus();
         Timer timer = new Timer();
         timer.Interval = 30000;
@@ -389,6 +399,7 @@ internal static class BigQMTAccountTray
 
     private static void RefreshStatus()
     {
+        RefreshAuthorizationKeyStatus();
         bool redis = TcpAvailable(RedisPort);
         bool dashboard = DashboardAvailable();
         string qmt = QmtStatus();
@@ -743,6 +754,209 @@ internal static class BigQMTAccountTray
             }
         }
         catch (Exception error) { return error.GetType().Name + ": " + error.Message; }
+    }
+
+    private static string RunPythonWithSecretEnvironment(string scriptName, string arguments, string environmentName, string secret, int timeout, out bool ok)
+    {
+        // The Key is never placed on the command line, written to a file or
+        // included in an audit entry.  It exists only in this tray process and
+        // the short-lived child process environment used to write Windows
+        // Credential Manager.
+        ok = false;
+        try
+        {
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = "py.exe";
+            info.Arguments = "-3.12 \"" + Path.Combine(RootPath(), "scripts", scriptName) + "\" " + arguments;
+            info.WorkingDirectory = RootPath(); info.UseShellExecute = false; info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true; info.RedirectStandardError = true;
+            info.EnvironmentVariables[environmentName] = secret;
+            using (Process process = Process.Start(info))
+            {
+                string stdout = process.StandardOutput.ReadToEnd(); string stderr = process.StandardError.ReadToEnd();
+                if (!process.WaitForExit(timeout)) { try { process.Kill(); } catch { } return stdout + stderr; }
+                ok = process.ExitCode == 0; return stdout + stderr;
+            }
+        }
+        catch (Exception error) { return error.GetType().Name + ": " + error.Message; }
+    }
+
+    private static void RefreshAuthorizationKeyStatus()
+    {
+        bool ok;
+        string output = RunPython(
+            "manage_order_authorization_key.py",
+            "status --profile " + Profile + " --account \"" + Account + "\"",
+            15000,
+            out ok
+        );
+        string state = JsonString(output, "state");
+        string fingerprint = JsonString(output, "fingerprint");
+        string boundAccount = JsonString(output, "account_id");
+        if (state.Length == 0) state = ok ? "UNKNOWN" : "ERROR";
+        string text;
+        if (state == "VALID")
+        {
+            string shortFingerprint = fingerprint.Length > 15 ? fingerprint.Substring(0, 15) + "…" : fingerprint;
+            text = "有效｜账户 " + boundAccount + (shortFingerprint.Length > 0 ? "｜" + shortFingerprint : "")
+                + "｜仍需全部执行门禁";
+        }
+        else if (state == "MISSING") text = "未安装｜账户只读";
+        else if (state == "ACCOUNT_MISMATCH") text = "账户不匹配｜账户只读";
+        else if (state == "CREDENTIAL_STORE_UNAVAILABLE") text = "凭据库不可用｜账户只读";
+        else text = "无效（" + state + "）｜账户只读";
+        if (authorizationKeyItem != null) authorizationKeyItem.Text = "下单授权 Key：" + text;
+        if (state != lastAuthorizationKeyState)
+        {
+            string auditFingerprint = fingerprint.Length > 15 ? fingerprint.Substring(0, 15) : fingerprint;
+            Audit("authorization_key_status", "state=" + state + "; account=" + boundAccount + "; fingerprint=" + auditFingerprint + "; secret_logged=false");
+        }
+        lastAuthorizationKeyState = state;
+    }
+
+    private static void ShowAuthorizationKeyStatus()
+    {
+        RefreshAuthorizationKeyStatus();
+        string explanation = lastAuthorizationKeyState == "VALID"
+            ? "本账户授权 Key 有效。\n\nKey 仅提供下单资格，仍须同时通过策略开关、运行窗口、Coordinator 冲突检查、风控和券商前置校验。"
+            : "本账户没有有效授权 Key，因此只允许只读账户操作，不能进入下单执行门禁。";
+        MessageBox.Show(explanation, ProfileTitle + "｜授权 Key", MessageBoxButtons.OK,
+            lastAuthorizationKeyState == "VALID" ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        Audit("authorization_key_viewed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+    }
+
+    private static void InstallAuthorizationKey()
+    {
+        string first = ""; string second = "";
+        try
+        {
+            if (!PromptPassword(ProfileTitle + "｜加入授权 Key", "输入本账户授权 Key（至少 10 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜确认授权 Key", "再次输入本账户授权 Key：", out second)) return;
+            if (first != second)
+            {
+                MessageBox.Show("两次输入的授权 Key 不一致，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_rejected", "confirmation_mismatch; secret_logged=false");
+                return;
+            }
+            if (first.Trim().Length < 10)
+            {
+                MessageBox.Show("授权 Key 至少需要 10 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_rejected", "key_too_short; secret_logged=false");
+                return;
+            }
+            bool ok;
+            string output = RunPythonWithSecretEnvironment(
+                "manage_order_authorization_key.py",
+                "set --profile " + Profile + " --account \"" + Account + "\"",
+                "BIGQMT_ORDER_AUTHORIZATION_KEY_INPUT",
+                first,
+                15000,
+                out ok
+            );
+            RefreshAuthorizationKeyStatus();
+            if (ok && lastAuthorizationKeyState == "VALID")
+            {
+                MessageBox.Show("授权 Key 已保存到本机 Windows 凭据管理器。\n\n它只对当前托盘账户生效；Key 有效不代表绕过其他下单门禁。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Audit("authorization_key_installed", "account=" + Account + "; secret_logged=false");
+            }
+            else
+            {
+                MessageBox.Show("授权 Key 保存失败：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_failed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+            }
+        }
+        finally
+        {
+            first = ""; second = "";
+        }
+    }
+
+    private static void DeleteAuthorizationKey()
+    {
+        string expectedHash = NestedConfigString(LoadMachineLocal(), "tray", "delete_strategy_password_sha256").ToLowerInvariant();
+        if (expectedHash.Length != 64)
+        {
+            MessageBox.Show("未配置删除密码散列（tray.delete_strategy_password_sha256），无法删除授权 Key。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "missing_password_hash; secret_logged=false");
+            return;
+        }
+        string password;
+        if (!PromptPassword("删除本账户授权 Key", "输入托盘删除密码：", out password) || password.Length == 0)
+        {
+            Audit("authorization_key_delete_cancelled", "user_cancelled; secret_logged=false");
+            return;
+        }
+        if (Sha256Hex(password) != expectedHash)
+        {
+            MessageBox.Show("密码错误，授权 Key 未删除。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "bad_password; secret_logged=false");
+            return;
+        }
+        if (MessageBox.Show("删除当前账户的本机授权 Key？\n\n删除后该托盘立即退回账户只读状态。", ProfileTitle,
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        bool ok;
+        string output = RunPython(
+            "manage_order_authorization_key.py",
+            "delete --profile " + Profile + " --account \"" + Account + "\"",
+            15000,
+            out ok
+        );
+        RefreshAuthorizationKeyStatus();
+        if (ok && lastAuthorizationKeyState == "MISSING")
+        {
+            MessageBox.Show("授权 Key 已删除，本账户现为只读。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Audit("authorization_key_deleted", "account=" + Account + "; secret_logged=false");
+        }
+        else
+        {
+            MessageBox.Show("授权 Key 删除结果无法确认：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_failed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+        }
+    }
+
+    private static void ConfigureDeletePassword()
+    {
+        string first = ""; string second = "";
+        try
+        {
+            if (!PromptPassword(ProfileTitle + "｜设置删除密码", "输入托盘删除密码（至少 8 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜确认删除密码", "再次输入托盘删除密码：", out second)) return;
+            if (first != second)
+            {
+                MessageBox.Show("两次输入的删除密码不一致，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "confirmation_mismatch; secret_logged=false");
+                return;
+            }
+            if (first.Length < 8)
+            {
+                MessageBox.Show("删除密码至少需要 8 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "password_too_short; secret_logged=false");
+                return;
+            }
+            bool ok;
+            string output = RunPythonWithSecretEnvironment(
+                "manage_tray_delete_password.py",
+                "set",
+                "BIGQMT_TRAY_DELETE_PASSWORD_INPUT",
+                first,
+                15000,
+                out ok
+            );
+            if (ok)
+            {
+                MessageBox.Show("托盘删除密码已保存为本机散列。\n\n删除策略或授权 Key 时将要求输入此密码。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Audit("tray_delete_password_configured", "secret_logged=false");
+            }
+            else
+            {
+                MessageBox.Show("删除密码无法保存：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_configure_failed", "secret_logged=false");
+            }
+        }
+        finally
+        {
+            first = ""; second = "";
+        }
     }
 
     private static void SetIcon(string state)
@@ -1239,8 +1453,11 @@ internal static class BigQMTAccountTray
 
     private static void LockReminder()
     {
-        MessageBox.Show("订单锁保持开启。正式账户永久只读；模拟账户的策略开关本身不直接下单。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        Audit("order_lock_viewed", "locked");
+        string keyText = lastAuthorizationKeyState == "VALID"
+            ? "本账户授权 Key 有效，但仍必须通过策略开关、运行窗口、Coordinator 冲突检查与风控。"
+            : "本账户没有有效授权 Key，当前只能执行账户只读操作，不能下单。";
+        MessageBox.Show(keyText, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        Audit("order_lock_viewed", "authorization_key_state=" + lastAuthorizationKeyState + "; secret_logged=false");
     }
 
     private static void GenerateDiagnosis()
