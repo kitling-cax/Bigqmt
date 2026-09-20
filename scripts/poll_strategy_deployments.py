@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from contextlib import AbstractContextManager
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,6 +22,60 @@ sys.path.insert(0, str(ROOT / "src"))
 from kitling_bigqmt.coordinator_endpoint import resolve_coordinator  # noqa: E402
 from kitling_bigqmt.machine_config import load_machine_local  # noqa: E402
 from kitling_bigqmt.strategy_installer import install_package  # noqa: E402
+
+
+class HostPollLock(AbstractContextManager):
+    """Prevent the simulation and production trays racing on one host.
+
+    Both account trays intentionally share one host queue.  A process-level
+    lock is required because each tray launches this script independently.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+b")
+        self.handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            if self.handle.tell() == 0:
+                self.handle.write(b"0")
+                self.handle.flush()
+                self.handle.seek(0)
+            try:
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                self.handle.close()
+                self.handle = None
+                raise RuntimeError("another tray is polling strategy deployments") from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                self.handle.close()
+                self.handle = None
+                raise RuntimeError("another tray is polling strategy deployments") from exc
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.handle is None:
+            return False
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+        return False
 
 
 def _json_request(url: str, *, method: str = "GET", payload: dict | None = None) -> dict:
@@ -49,38 +105,50 @@ def poll_once() -> dict:
     if not host_id.strip():
         raise ValueError("host_id is not configured")
     library_root, install_root = _paths(load_machine_local(ROOT))
-    pending = _json_request(
-        endpoint.rstrip("/") + "/api/v1/strategy-deployments?host_id=" + host_id
-    ).get("deployments", [])
-    results = []
-    for request in pending if isinstance(pending, list) else []:
-        deployment_id = str(request.get("deployment_id") or "")
-        package_path = Path(str(request.get("package_path") or ""))
-        package_dir = (library_root / package_path).resolve()
-        try:
-            package_dir.relative_to(library_root.resolve())
-        except ValueError:
-            package_dir = Path("__invalid_package_path__")
-        try:
-            _json_request(
-                endpoint.rstrip("/") + "/api/v1/strategy-deployments/" + deployment_id + "/status",
-                method="POST", payload={"host_id": host_id, "status": "INSTALLING", "result": {"orders_enabled": False}},
-            )
-            result = install_package(package_dir, install_root)
-            status = "INSTALLED" if result.get("status") == "INSTALLED" else "INSTALLED"
-            detail = result
-        except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as exc:
-            status = "FAILED"
-            detail = {"reason": str(exc), "orders_enabled": False, "run_after_install": False}
-        try:
-            _json_request(
-                endpoint.rstrip("/") + "/api/v1/strategy-deployments/" + deployment_id + "/status",
-                method="POST", payload={"host_id": host_id, "status": status, "result": detail},
-            )
-        except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as exc:
-            detail = {**detail, "status_callback_error": str(exc)}
-        results.append({"deployment_id": deployment_id, "status": status, "result": detail})
-    return {"status": "ok", "host_id": host_id, "orders_enabled": False, "deployments": results}
+    lock_path = install_root.parent / ".strategy_deployment_poll.lock"
+    try:
+        lock = HostPollLock(lock_path)
+        lock.__enter__()
+    except RuntimeError:
+        return {
+            "status": "busy", "host_id": host_id, "orders_enabled": False,
+            "deployments": [], "reason": "another tray is polling strategy deployments",
+        }
+    try:
+        pending = _json_request(
+            endpoint.rstrip("/") + "/api/v1/strategy-deployments?host_id=" + host_id
+        ).get("deployments", [])
+        results = []
+        for request in pending if isinstance(pending, list) else []:
+            deployment_id = str(request.get("deployment_id") or "")
+            package_path = Path(str(request.get("package_path") or ""))
+            package_dir = (library_root / package_path).resolve()
+            try:
+                package_dir.relative_to(library_root.resolve())
+            except ValueError:
+                package_dir = Path("__invalid_package_path__")
+            try:
+                _json_request(
+                    endpoint.rstrip("/") + "/api/v1/strategy-deployments/" + deployment_id + "/status",
+                    method="POST", payload={"host_id": host_id, "status": "INSTALLING", "result": {"orders_enabled": False}},
+                )
+                result = install_package(package_dir, install_root)
+                status = "INSTALLED" if result.get("status") == "INSTALLED" else "INSTALLED"
+                detail = result
+            except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as exc:
+                status = "FAILED"
+                detail = {"reason": str(exc), "orders_enabled": False, "run_after_install": False}
+            try:
+                _json_request(
+                    endpoint.rstrip("/") + "/api/v1/strategy-deployments/" + deployment_id + "/status",
+                    method="POST", payload={"host_id": host_id, "status": status, "result": detail},
+                )
+            except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as exc:
+                detail = {**detail, "status_callback_error": str(exc)}
+            results.append({"deployment_id": deployment_id, "status": status, "result": detail})
+        return {"status": "ok", "host_id": host_id, "orders_enabled": False, "deployments": results}
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def main() -> int:
@@ -98,4 +166,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

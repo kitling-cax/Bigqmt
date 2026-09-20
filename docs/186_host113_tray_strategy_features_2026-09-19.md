@@ -22,7 +22,8 @@
 cd E:\kitling_QMT_work\kitling_bigqmt
 git fetch origin 'refs/heads/*:refs/remotes/origin/*'
 git checkout host/113/structure
-# 先合并 184/185 的基线（若已合并过会自动 up to date，幂等），再合并本单特性
+# 先合并基线（若 .113 已做过 184/185 会自动 up to date，幂等），再合并特性分支。
+# feature/tray-strategy-control 已含并发轮询修复（41874d3 / b058981），合并它即一次到位。
 git merge --no-edit origin/feature/strategy-deployment
 # 若本机分支已有自己改动：先看 git status，不要覆盖 machine.local.json / 凭据 / 运行数据
 git merge --no-edit origin/feature/tray-strategy-control
@@ -30,14 +31,25 @@ git merge --no-edit origin/feature/tray-strategy-control
 
 若 merge 冲突，停下来不猜；把冲突文件名和 `git diff --check` 输出报告给 105/125，不要自己乱解。
 
+### 1.5 处理工作区行尾噪音（仅当 `git status --porcelain` 非空时）
+
+若报出 `M config/strategy_runtime_policy.json` 这类 json 行尾（CRLF/LF）噪音，用 `--ignore-cr-at-eol` 判定：
+
+```powershell
+git diff --ignore-cr-at-eol config/strategy_runtime_policy.json
+```
+
+- 输出为空 → 纯行尾差异，`git checkout HEAD -- config/strategy_runtime_policy.json` 后继续
+- 输出非空 → 停止，贴输出，不要 `git checkout` / `stash` / 推
+
 ### 2. 无头验证（先确认 Python 链路通，再动 GUI）
 
 ```powershell
-py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog_page.py tests/test_uninstall_strategy_package.py tests/test_set_strategy_auto_run.py -q
+py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog_page.py tests/test_uninstall_strategy_package.py tests/test_set_strategy_auto_run.py tests/test_strategy_deployment_poll.py -q
 py -3.12 scripts/verify_host_tray_features.py
 ```
 
-预期：pytest 12 passed；verify 全 PASS。任何 FAIL 先停下报告，不要继续编译。
+预期：pytest 17 passed；verify 全 PASS。任何 FAIL 先停下报告，不要继续编译。
 
 ### 3. 配置 `config/machine.local.json`（只留本机，不提交）
 

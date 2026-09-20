@@ -83,6 +83,18 @@ class StrategyDeploymentStore:
                 "SELECT * FROM strategy_deployments WHERE idempotency_key=?", (key,)
             ).fetchone()
             if existing:
+                # A failed install is safe to retry with the same candidate
+                # and host.  Keep successful/idempotently active rows stable.
+                if str(existing["status"]) in {"FAILED", "REJECTED"}:
+                    db.execute(
+                        "UPDATE strategy_deployments SET status='REQUESTED', result_json='{}', updated_at=? "
+                        "WHERE deployment_id=?",
+                        (timestamp, existing["deployment_id"]),
+                    )
+                    existing = db.execute(
+                        "SELECT * FROM strategy_deployments WHERE deployment_id=?",
+                        (existing["deployment_id"],),
+                    ).fetchone()
                 return self._row(existing)
             db.execute(
                 """INSERT INTO strategy_deployments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",

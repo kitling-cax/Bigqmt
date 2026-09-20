@@ -48,3 +48,18 @@ def test_deployment_store_is_idempotent_and_host_scoped(tmp_path: Path):
     assert updated["status"] == "INSTALLED"
     assert store.pending_for_host(".125") == []
 
+
+def test_failed_request_can_be_retried(tmp_path: Path):
+    store = StrategyDeploymentStore(tmp_path / "coordinator.sqlite3")
+    first = store.request_install(
+        strategy_id="S1", version="v1", build_id="b1", manifest_sha256="a" * 64,
+        package_path="S1/v1/b1", target_host_id="host-1",
+    )
+    store.update_status(first["deployment_id"], "host-1", "FAILED", {"reason": "temporary"})
+    retried = store.request_install(
+        strategy_id="S1", version="v1", build_id="b1", manifest_sha256="a" * 64,
+        package_path="S1/v1/b1", target_host_id="host-1",
+    )
+    assert retried["deployment_id"] == first["deployment_id"]
+    assert retried["status"] == "REQUESTED"
+    assert retried["result"] == {}
