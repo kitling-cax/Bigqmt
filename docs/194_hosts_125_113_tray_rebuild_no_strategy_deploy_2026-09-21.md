@@ -16,7 +16,7 @@
 
 仓库：`https://github.com/kitling-cax/Bigqmt.git`  
 发布分支：`feature/nas-private-config`  
-发布提交：由 `.105` 负责人在消息中提供本次最新 commit hash。
+发布提交：`1c44d6b`（完整 hash 可在 GitHub 分支查看）。
 
 ## `.125` 执行步骤
 
@@ -26,7 +26,7 @@
 git fetch origin --prune
 git status --short
 git branch --show-current
-git cherry-pick <本次发布commit>
+git cherry-pick 1c44d6b
 py -3.12 -m pytest -q
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_native_account_trays.ps1
 ```
@@ -61,7 +61,7 @@ Start-Process .\tray\BigQMT_Production_ReadOnly.exe
 git fetch origin --prune
 git status --short
 git branch --show-current
-git cherry-pick <本次发布commit>
+git cherry-pick 1c44d6b
 py -3.12 -m pytest -q
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_native_account_trays.ps1
 Get-Process -Name BigQMT_Simulation,BigQMT_Production_ReadOnly -ErrorAction SilentlyContinue | Stop-Process -Force
