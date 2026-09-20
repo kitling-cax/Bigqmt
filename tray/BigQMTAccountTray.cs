@@ -146,6 +146,7 @@ internal static class BigQMTAccountTray
         ToolStripMenuItem keyMenu = new ToolStripMenuItem("下单授权 Key 管理");
         keyMenu.DropDownItems.Add("查看本账户 Key 状态", null, delegate { ShowAuthorizationKeyStatus(); });
         keyMenu.DropDownItems.Add("加入本账户授权 Key", null, delegate { InstallAuthorizationKey(); });
+        keyMenu.DropDownItems.Add("设置/修改托盘删除密码", null, delegate { ConfigureDeletePassword(); });
         keyMenu.DropDownItems.Add("删除本账户授权 Key", null, delegate { DeleteAuthorizationKey(); });
         menu.Items.Add(keyMenu);
         menu.Items.Add("打开看板", null, delegate { OpenDashboard(); });
@@ -829,7 +830,7 @@ internal static class BigQMTAccountTray
         string first = ""; string second = "";
         try
         {
-            if (!PromptPassword(ProfileTitle + "｜加入授权 Key", "输入本账户授权 Key（至少 32 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜加入授权 Key", "输入本账户授权 Key（至少 10 个字符）：", out first)) return;
             if (!PromptPassword(ProfileTitle + "｜确认授权 Key", "再次输入本账户授权 Key：", out second)) return;
             if (first != second)
             {
@@ -837,9 +838,9 @@ internal static class BigQMTAccountTray
                 Audit("authorization_key_install_rejected", "confirmation_mismatch; secret_logged=false");
                 return;
             }
-            if (first.Trim().Length < 32)
+            if (first.Trim().Length < 10)
             {
-                MessageBox.Show("授权 Key 至少需要 32 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("授权 Key 至少需要 10 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 Audit("authorization_key_install_rejected", "key_too_short; secret_logged=false");
                 return;
             }
@@ -910,6 +911,51 @@ internal static class BigQMTAccountTray
         {
             MessageBox.Show("授权 Key 删除结果无法确认：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             Audit("authorization_key_delete_failed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+        }
+    }
+
+    private static void ConfigureDeletePassword()
+    {
+        string first = ""; string second = "";
+        try
+        {
+            if (!PromptPassword(ProfileTitle + "｜设置删除密码", "输入托盘删除密码（至少 8 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜确认删除密码", "再次输入托盘删除密码：", out second)) return;
+            if (first != second)
+            {
+                MessageBox.Show("两次输入的删除密码不一致，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "confirmation_mismatch; secret_logged=false");
+                return;
+            }
+            if (first.Length < 8)
+            {
+                MessageBox.Show("删除密码至少需要 8 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "password_too_short; secret_logged=false");
+                return;
+            }
+            bool ok;
+            string output = RunPythonWithSecretEnvironment(
+                "manage_tray_delete_password.py",
+                "set",
+                "BIGQMT_TRAY_DELETE_PASSWORD_INPUT",
+                first,
+                15000,
+                out ok
+            );
+            if (ok)
+            {
+                MessageBox.Show("托盘删除密码已保存为本机散列。\n\n删除策略或授权 Key 时将要求输入此密码。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Audit("tray_delete_password_configured", "secret_logged=false");
+            }
+            else
+            {
+                MessageBox.Show("删除密码无法保存：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_configure_failed", "secret_logged=false");
+            }
+        }
+        finally
+        {
+            first = ""; second = "";
         }
     }
 

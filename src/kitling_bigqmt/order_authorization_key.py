@@ -13,7 +13,7 @@ from typing import Any
 
 
 SUPPORTED_PROFILES = {"simulation", "production_readonly"}
-MINIMUM_KEY_LENGTH = 32
+MINIMUM_KEY_LENGTH = 10
 
 
 class OrderAuthorizationKeyError(RuntimeError):
@@ -46,7 +46,7 @@ def write(profile: str, account_id: str, secret: str) -> dict[str, Any]:
     if not account_id:
         raise OrderAuthorizationKeyError("account_id is required")
     if len(secret.strip()) < MINIMUM_KEY_LENGTH:
-        raise OrderAuthorizationKeyError("authorization Key must contain at least 32 characters")
+        raise OrderAuthorizationKeyError("authorization Key must contain at least 10 characters")
     try:
         import win32cred
 

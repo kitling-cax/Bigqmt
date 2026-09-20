@@ -65,5 +65,5 @@ def test_missing_and_delete_are_fail_closed_and_idempotent(monkeypatch):
 
 def test_weak_key_is_rejected(monkeypatch):
     _fake_store(monkeypatch)
-    with pytest.raises(keys.OrderAuthorizationKeyError, match="32"):
+    with pytest.raises(keys.OrderAuthorizationKeyError, match="10"):
         keys.write("simulation", "90000001", "too-short")
