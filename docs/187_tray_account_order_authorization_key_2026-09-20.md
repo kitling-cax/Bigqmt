@@ -34,7 +34,7 @@ KitlingBigQMT/OrderAuthorization/production_readonly
 
 1. **查看本账户 Key 状态**：显示是否有效及当前保护状态；
 2. **加入本账户授权 Key**：遮罩输入两次，最少 32 个字符，写入 Windows Credential Manager；
-3. **删除本账户授权 Key**：确认后删除，账户立即退回只读状态。
+3. **删除本账户授权 Key**：先输入托盘删除密码，再二次确认；删除后账户立即退回只读状态。
 
 托盘主状态区持续显示 `下单授权 Key` 状态，每 30 秒刷新一次。状态变化写审计事件，但审计内容不含 Key。
 
@@ -83,4 +83,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_native_account
 
 ## 7. 回滚
 
-如需紧急停止某账户的本机下单资格，优先在托盘中选择 **删除本账户授权 Key**。该操作不删除 QMT 登录凭据、不停止查询服务、不影响账户快照和 Host Agent 心跳。
+如需紧急停止某账户的本机下单资格，优先在托盘中选择 **删除本账户授权 Key**，输入托盘删除密码并确认。该操作不删除 QMT 登录凭据、不停止查询服务、不影响账户快照和 Host Agent 心跳。

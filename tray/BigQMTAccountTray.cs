@@ -872,6 +872,25 @@ internal static class BigQMTAccountTray
 
     private static void DeleteAuthorizationKey()
     {
+        string expectedHash = NestedConfigString(LoadMachineLocal(), "tray", "delete_strategy_password_sha256").ToLowerInvariant();
+        if (expectedHash.Length != 64)
+        {
+            MessageBox.Show("未配置删除密码散列（tray.delete_strategy_password_sha256），无法删除授权 Key。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "missing_password_hash; secret_logged=false");
+            return;
+        }
+        string password;
+        if (!PromptPassword("删除本账户授权 Key", "输入托盘删除密码：", out password) || password.Length == 0)
+        {
+            Audit("authorization_key_delete_cancelled", "user_cancelled; secret_logged=false");
+            return;
+        }
+        if (Sha256Hex(password) != expectedHash)
+        {
+            MessageBox.Show("密码错误，授权 Key 未删除。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "bad_password; secret_logged=false");
+            return;
+        }
         if (MessageBox.Show("删除当前账户的本机授权 Key？\n\n删除后该托盘立即退回账户只读状态。", ProfileTitle,
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
         bool ok;
