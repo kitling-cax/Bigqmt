@@ -24,6 +24,7 @@ from kitling_bigqmt.runtime_control import RuntimeControl  # noqa: E402
 from kitling_bigqmt.execution_admission import require_admission_for_root  # noqa: E402
 from kitling_bigqmt.machine_config import load_gateway  # noqa: E402
 from kitling_bigqmt.simulation_execution import ACCOUNT_ID, STRATEGY_ID, build_order_plan  # noqa: E402
+from kitling_bigqmt.simulation_cycle import live_broker_orders  # noqa: E402
 from kitling_bigqmt.sleeve_accounting import SleeveAccounting  # noqa: E402
 from kitling_bigqmt.state_store import RuntimeStateStore  # noqa: E402
 
@@ -74,7 +75,7 @@ def main() -> int:
     tick = client.full_tick([target])
     if not asset.get("ok"):
         raise SystemExit("blocked: account preflight failed")
-    if list(orders.get("data") or []):
+    if live_broker_orders(list(orders.get("data") or [])):
         raise SystemExit("blocked: account has open orders")
     if (positions.get("data") or {}).get(target):
         raise SystemExit("blocked: target already exists in broker account and cannot be claimed as a new sleeve")
@@ -89,7 +90,9 @@ def main() -> int:
     evidence = {
         "kind": "v1_1_15_simulation_entry_activation", "created_at": datetime.now().astimezone().isoformat(),
         "account_id": ACCOUNT_ID, "strategy_id": STRATEGY_ID, "signal_day": event.get("signal_day"),
-        "plan": plan, "ping": ping.get("data"), "open_order_count": len(orders.get("data") or []),
+        "plan": plan, "ping": ping.get("data"),
+        "order_count": len(orders.get("data") or []),
+        "open_order_count": len(live_broker_orders(list(orders.get("data") or []))),
         "target_preexisting_position": False, "execution_requested": bool(args.execute),
     }
     if not args.execute:

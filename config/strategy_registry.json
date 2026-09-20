@@ -19,7 +19,7 @@
       "initial_capital": 100000,
       "max_capital": 100000,
       "sleeve_id": "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15",
-      "allowed_accounts": ["90000001"],
+      "allowed_accounts": ["99022040"],
       "formal_account_allowed": false,
       "signal_frequency": "daily_close_next_session",
       "risk_profile": "ETF_T1_SINGLE_POSITION_98PCT_CAP",
@@ -54,7 +54,7 @@
         "startup_mode": "ISOLATE_NEW",
         "activation_signal_not_before": "20260911",
         "activation_note": "20260911 user approval: do not wait 20 shadow days; start a new 100,000 CNY simulation sleeve after the next completed close signal. Do not adopt virtual shadow fills or external broker holdings.",
-        "broker_order_authority": "SIMULATION_90000001_ONLY",
+        "broker_order_authority": "SIMULATION_99022040_ONLY",
         "formal_execution": "FORBIDDEN"
       },
       "shadow_runtime": {

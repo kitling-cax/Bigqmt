@@ -1,6 +1,6 @@
 {
   "environment": "production",
-  "account_id": "90000002",
+  "account_id": "8890526688",
   "account_type": "STOCK",
   "read_only": true,
   "redis": {
@@ -15,7 +15,7 @@
   },
   "rpc_timeout_seconds": 12,
   "bridge_snapshot_max_age_seconds": 4500,
-  "state_db": "C:\\BigQMT\\work\\kitling_bigqmt\\runtime_data\\state\\production\\qmt_runtime.sqlite3",
-  "audit_dir": "C:\\BigQMT\\work\\kitling_bigqmt\\runtime_data\\audit\\production",
+  "state_db": "state/production/qmt_runtime.sqlite3",
+  "audit_dir": "audit/production",
   "quote_codes": []
 }

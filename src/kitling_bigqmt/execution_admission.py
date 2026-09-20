@@ -26,6 +26,8 @@ from urllib.request import urlopen
 
 from .coordinator_endpoint import resolve_coordinator
 from .coordinator_lease_projection import project_local_lease
+from .machine_config import load_gateway, load_machine_local
+from .order_authorization_key import status as order_authorization_key_status
 from .host_agent_account_policy import (
     AccountPolicyRejected,
     evaluate_local_execution,
@@ -123,12 +125,29 @@ def _authorization_denial(
     return None
 
 
+def _order_key_denial(
+    key_status: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+) -> str | None:
+    """Return the fail-closed denial reason for the persistent local Key."""
+    if not isinstance(key_status, Mapping) or not key_status.get("installed"):
+        return "LOCAL_ORDER_KEY_MISSING"
+    if str(key_status.get("account_id") or "").strip() != account_id:
+        return "LOCAL_ORDER_KEY_ACCOUNT_MISMATCH"
+    if key_status.get("valid") is not True:
+        return "LOCAL_ORDER_KEY_INVALID:%s" % str(key_status.get("state") or "INVALID")
+    return None
+
+
 def evaluate_execution_admission(
     profile: str,
     *,
     account_id: str | None = None,
     host_id: str | None = None,
     strategy_id: str | None = None,
+    configured_account_id: str | None = None,
+    order_key_status: Mapping[str, Any] | None = None,
     authorization: Mapping[str, Any] | None = None,
     designation: Mapping[str, Any] | None = None,
     lease_envelope: Mapping[str, Any] | None = None,
@@ -142,7 +161,9 @@ def evaluate_execution_admission(
     """
     moment = time.time() if now_epoch is None else float(now_epoch)
     try:
-        policy = resolve_account_policy(profile, account_id)
+        policy = resolve_account_policy(
+            profile, account_id, configured_account_id=configured_account_id
+        )
     except AccountPolicyRejected as exc:
         return _deny("ACCOUNT_POLICY_REJECTED:%s" % exc, profile=profile, account_id=account_id)
 
@@ -154,6 +175,10 @@ def evaluate_execution_admission(
     }
     if policy.production_readonly:
         return _deny("PRODUCTION_READ_ONLY", **base)
+
+    key_denial = _order_key_denial(order_key_status, account_id=policy.account_id)
+    if key_denial is not None:
+        return _deny(key_denial, **base)
 
     denial = _authorization_denial(
         authorization, account_id=policy.account_id, strategy_id=strategy_id, now_epoch=moment
@@ -226,12 +251,42 @@ def require_admission_for_root(
 
     Scripts call this immediately before writing an order RPC request.
     """
-    endpoint, host_id = resolve_coordinator(Path(root))
+    root = Path(root)
+    endpoint, host_id = resolve_coordinator(root)
+    # The account is deployment-local (machine.local.json), not the synthetic
+    # repository default.  Passing it here keeps the armed control window and
+    # the admission policy bound to the same real simulation account.
+    gateway = load_gateway(root, profile)
+    account_id = str(gateway.get("account_id") or "").strip() or None
+    local_key = order_authorization_key_status(profile, account_id)
     designation = coordinator_designation(endpoint, profile, host_id, timeout=timeout)
+    # The Coordinator is a coordination/observability service, not the Redis
+    # order transport.  This deployment explicitly keeps it optional for the
+    # single local simulation account.  All local gates above the RPC remain
+    # mandatory; formal profiles never use this fallback.
+    machine = load_machine_local(root)
+    coordinator_config = machine.get("coordinator") if isinstance(machine, dict) else {}
+    simulation_coordinator_optional = (
+        profile == "simulation"
+        and isinstance(coordinator_config, dict)
+        and coordinator_config.get("simulation_execution_required") is False
+    )
+    if simulation_coordinator_optional and not bool(designation.get("eligible")):
+        designation = dict(designation)
+        designation.update({
+            "reachable": True,
+            "eligible": True,
+            "lease_state": "LOCAL_SIMULATION_SINGLE_WRITER",
+            "reason": "COORDINATOR_OPTIONAL_LOCAL_FALLBACK:%s" % str(designation.get("reason", "NOT_ELIGIBLE")),
+            "fallback_used": True,
+        })
     return require_execution_admission(
         profile,
+        account_id=account_id,
+        configured_account_id=account_id,
         host_id=host_id,
         strategy_id=strategy_id,
+        order_key_status=local_key,
         authorization=authorization,
         designation=designation,
         now_epoch=now_epoch,

@@ -39,10 +39,23 @@ def _designation(**overrides):
     return value
 
 
+def _order_key(**overrides):
+    value = {
+        "installed": True,
+        "valid": True,
+        "state": "VALID",
+        "account_id": "90000001",
+        "fingerprint": "sha256:" + "a" * 64,
+    }
+    value.update(overrides)
+    return value
+
+
 def _admit(**overrides):
     kwargs = {
         "host_id": "192.0.2.105",
         "strategy_id": STRATEGY_ID,
+        "order_key_status": _order_key(),
         "authorization": _armed(),
         "designation": _designation(),
         "now_epoch": 100.0,
@@ -91,6 +104,18 @@ def test_missing_local_window_is_denied():
     verdict = _admit(authorization=None)
     assert verdict["allowed"] is False
     assert verdict["reason"] == "LOCAL_AUTHORIZATION_MISSING"
+
+
+def test_missing_local_order_key_is_denied_before_runtime_window():
+    verdict = _admit(order_key_status=None)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "LOCAL_ORDER_KEY_MISSING"
+
+
+def test_order_key_bound_to_another_account_is_denied():
+    verdict = _admit(order_key_status=_order_key(account_id="90000002"))
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "LOCAL_ORDER_KEY_ACCOUNT_MISMATCH"
 
 
 def test_locked_local_control_is_denied():
@@ -154,7 +179,7 @@ def test_valid_lease_still_cannot_open_execution_in_this_milestone():
 def test_require_execution_admission_raises_with_the_verdict():
     with pytest.raises(ExecutionAdmissionDenied) as caught:
         require_execution_admission(
-            "simulation", host_id="192.0.2.105", authorization=_armed(),
+            "simulation", host_id="192.0.2.105", order_key_status=_order_key(), authorization=_armed(),
             designation=_designation(), now_epoch=100.0, lease_envelope={}, trusted_transport=True,
         )
     assert caught.value.reason == "unsupported lease schema"
@@ -164,7 +189,7 @@ def test_require_execution_admission_raises_with_the_verdict():
 def test_require_execution_admission_passes_the_happy_path():
     verdict = require_execution_admission(
         "simulation", host_id="192.0.2.105", strategy_id=STRATEGY_ID,
-        authorization=_armed(), designation=_designation(), now_epoch=100.0,
+        order_key_status=_order_key(), authorization=_armed(), designation=_designation(), now_epoch=100.0,
     )
     assert verdict["allowed"] is True
 

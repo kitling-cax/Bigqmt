@@ -13,6 +13,8 @@ from typing import Iterable
 
 SIMULATION_ACCOUNT = "90000001"
 PRODUCTION_ACCOUNT = "90000002"
+SIMULATION_DEPLOYMENT_ACCOUNT = "99022040"
+PRODUCTION_DEPLOYMENT_ACCOUNT = "8890526688"
 SIMULATION = "SIMULATION"
 PRODUCTION = "PRODUCTION"
 
@@ -40,9 +42,9 @@ class AccountAuthority:
 
 
 def expected_environment(account_id: str) -> str:
-    if account_id == SIMULATION_ACCOUNT:
+    if account_id in {SIMULATION_ACCOUNT, SIMULATION_DEPLOYMENT_ACCOUNT}:
         return SIMULATION
-    if account_id == PRODUCTION_ACCOUNT:
+    if account_id in {PRODUCTION_ACCOUNT, PRODUCTION_DEPLOYMENT_ACCOUNT}:
         return PRODUCTION
     raise ValueError("unknown account")
 

@@ -56,9 +56,34 @@ class SleeveAccounting:
         payload_hash = sha256_hex(payload_json)
         now = utc_now()
         with self.store.session() as db:
-            existing = db.execute("SELECT payload_hash FROM sleeve_fills WHERE fill_id=?", (payload["fill_id"],)).fetchone()
+            existing = db.execute("SELECT payload_hash, payload_json FROM sleeve_fills WHERE fill_id=?", (payload["fill_id"],)).fetchone()
             if existing:
-                if str(existing[0]) != payload_hash:
+                duplicate = False
+                if str(existing[0]) == payload_hash:
+                    duplicate = True
+                else:
+                    # The broker can re-serve an already-recorded fill with a
+                    # slightly different fee/price precision (for example
+                    # 22.4688777 first and 22.468877999999997 on a later
+                    # query).  Treat the row as the same fill when every
+                    # identity field matches exactly and the money fields only
+                    # differ by floating-point noise.
+                    import json as _json
+                    try:
+                        recorded = _json.loads(str(existing[1]))
+                        duplicate = (
+                            str(recorded.get("fill_id")) == payload["fill_id"]
+                            and str(recorded.get("strategy_id")) == payload["strategy_id"]
+                            and str(recorded.get("stock_code")) == payload["stock_code"]
+                            and str(recorded.get("side")) == side
+                            and int(recorded.get("quantity") or 0) == quantity
+                            and str(recorded.get("fill_time")) == payload["fill_time"]
+                            and abs(float(recorded.get("price") or 0) - price) <= 1e-4
+                            and abs(float(recorded.get("fee") or 0) - fee) <= 1e-4
+                        )
+                    except (ValueError, TypeError):
+                        duplicate = False
+                if not duplicate:
                     raise SleeveAccountingError("fill_id already exists with different payload")
                 return {"result": "DUPLICATE", "fill_id": payload["fill_id"], "orders_enabled": False}
             sleeve = db.execute("SELECT cash, realized_pnl FROM strategy_sleeves WHERE strategy_id=?", (payload["strategy_id"],)).fetchone()

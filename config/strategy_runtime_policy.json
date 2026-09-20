@@ -3,7 +3,12 @@
   "simulation": {
     "v1_1_15_auto_run_enabled": true,
     "v1_1_15_preflight_only_dates": [],
-    "policy_note": "Native tray master switch; it does not itself submit an order."
+    "policy_note": "Native tray master switch; it does not itself submit an order.",
+    "strategies": {
+      "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15": {
+        "auto_run_enabled": true
+      }
+    }
   },
   "production": {
     "strategy_recovery_enabled": false,

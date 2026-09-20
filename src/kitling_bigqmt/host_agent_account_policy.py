@@ -21,6 +21,13 @@ ACCOUNT_BY_PROFILE = {
     "simulation": "90000001",
     "production_readonly": "90000002",
 }
+# The repository defaults remain synthetic for tests and clean-room builds.
+# These deployment IDs are explicitly accepted when supplied by the local
+# machine overlay; they are not interchangeable across profiles.
+DEPLOYMENT_ACCOUNT_BY_PROFILE = {
+    "simulation": "99022040",
+    "production_readonly": "8890526688",
+}
 PRODUCTION_PROFILE = "production_readonly"
 PRODUCTION_ACCOUNT_ID = ACCOUNT_BY_PROFILE[PRODUCTION_PROFILE]
 
@@ -39,7 +46,12 @@ class AccountPolicy:
     production_readonly: bool
 
 
-def resolve_account_policy(profile: str, account_id: str | None = None) -> AccountPolicy:
+def resolve_account_policy(
+    profile: str,
+    account_id: str | None = None,
+    *,
+    configured_account_id: str | None = None,
+) -> AccountPolicy:
     """Resolve and validate a profile without opening any execution path.
 
     orders_enabled and execution_allowed are always False in the current
@@ -49,15 +61,18 @@ def resolve_account_policy(profile: str, account_id: str | None = None) -> Accou
     """
     if profile not in ACCOUNT_BY_PROFILE:
         raise AccountPolicyRejected("unknown profile: %s" % profile)
-    expected_account_id = ACCOUNT_BY_PROFILE[profile]
-    if account_id is not None and str(account_id) != expected_account_id:
+    configured = str(configured_account_id or "").strip()
+    expected_account_id = configured or ACCOUNT_BY_PROFILE[profile]
+    accepted_ids = {expected_account_id, ACCOUNT_BY_PROFILE[profile], DEPLOYMENT_ACCOUNT_BY_PROFILE[profile]}
+    if account_id is not None and str(account_id) not in accepted_ids:
         raise AccountPolicyRejected(
             "account %s does not match profile %s" % (account_id, profile)
         )
+    resolved_account_id = str(account_id) if account_id is not None else expected_account_id
     production_readonly = profile == PRODUCTION_PROFILE
     return AccountPolicy(
         profile=profile,
-        account_id=expected_account_id,
+        account_id=resolved_account_id,
         environment="production" if production_readonly else "simulation",
         orders_enabled=False,
         execution_allowed=False,
@@ -73,6 +88,7 @@ def evaluate_local_execution(
     lease_envelope: dict[str, Any] | None = None,
     trusted_transport: bool = False,
     now_epoch: float | None = None,
+    configured_account_id: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate one local execution decision and always fail closed in M03.
 
@@ -80,7 +96,9 @@ def evaluate_local_execution(
     allowed remains False even when a syntactically valid simulation lease is
     supplied, because M03 does not yet include leased execution.
     """
-    policy = resolve_account_policy(profile, account_id)
+    policy = resolve_account_policy(
+        profile, account_id, configured_account_id=configured_account_id
+    )
     if policy.production_readonly:
         return {
             "profile": policy.profile,
