@@ -67,8 +67,8 @@ internal static class BigQMTAccountTray
 
     // v1.1.15 unattended simulation schedule (simulation profile only).
     // This tray never submits an order itself. It only invokes the fail-closed
-    // Python cycle scripts that arm, submit at most one deterministically
-    // identified order, then immediately re-lock the runtime control.
+    // Python cycle scripts. Local execution remains enabled until the
+    // operator explicitly locks it or removes the authorization Key.
     private static readonly object scheduleLock = new object();
     private static bool schedulerBusy = false;
     private static string lastCloseShadowDate = "";
@@ -418,7 +418,7 @@ internal static class BigQMTAccountTray
             + "｜看板 " + (dashboard ? "正常" : "不可达")
             + "｜" + snapshotFreshness
             + "｜" + (Profile == "simulation"
-                ? (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜当前订单窗口关闭" : "模拟授权缺失｜订单锁定")
+                ? (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜本机执行已开放" : "模拟授权缺失｜订单锁定")
                 : "正式只读｜订单锁定");
         statusItem.Text = ProfileTitle + " " + Account + "：" + state + "（" + detail + "）";
         qmtItem.Text = "QMT：" + (qmt == "RUNNING" ? "运行中（Bridge Ping 为账户链路证明）" : "未运行（将自动补拉）");
@@ -1474,7 +1474,7 @@ internal static class BigQMTAccountTray
     private static void LockReminder()
     {
         string keyText = lastAuthorizationKeyState == "VALID"
-            ? "本账户授权 Key 有效，但仍必须通过策略开关、运行窗口、Coordinator 冲突检查与风控。"
+            ? "本账户授权 Key 有效，本机可无人值守执行；仍受策略开关、交易时段、对账与风控保护。"
             : "本账户没有有效授权 Key，当前只能执行账户只读操作，不能下单。";
         MessageBox.Show(keyText, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
         Audit("order_lock_viewed", "authorization_key_state=" + lastAuthorizationKeyState + "; secret_logged=false");
@@ -1503,7 +1503,21 @@ internal static class BigQMTAccountTray
         string health = bridgeLiveHealthy ? "运行就绪" : "降级（Bridge 不可用）";
         strategyRuntimeItem.Text = "策略运行状况：v1.1.15 " + health
             + "｜自动运行开｜"
-            + (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜当前订单窗口关闭" : "授权缺失｜订单锁定");
+            + (lastAuthorizationKeyState == "VALID" && LocalSimulationExecutionEnabled() ? "模拟授权有效｜本机执行已开放" : "授权或本机执行未开放｜订单锁定");
+    }
+
+    private static bool LocalSimulationExecutionEnabled()
+    {
+        try
+        {
+            string path = Path.Combine(RootPath(), "runtime_data", "control", "simulation", "runtime_control.json");
+            if (!File.Exists(path)) return false;
+            var map = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as System.Collections.Generic.Dictionary<string, object>;
+            return map != null && Convert.ToBoolean(map["orders_enabled"])
+                && Convert.ToBoolean(map["execution_consumer_enabled"])
+                && string.Equals(Convert.ToString(map["mode"]), "SIMULATION_STRATEGY_EXECUTION_ENABLED", StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     private static void GenerateDiagnosis()

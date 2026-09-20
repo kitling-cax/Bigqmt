@@ -64,12 +64,12 @@ def _admit(**overrides):
     return evaluate_execution_admission("simulation", **kwargs)
 
 
-def test_simulation_with_all_signals_is_admitted_without_standing_switch():
+def test_simulation_with_all_signals_is_admitted_with_local_switch():
     verdict = _admit()
     assert verdict["allowed"] is True
     assert verdict["reason"] == ADMITTED_REASON
-    assert verdict["orders_enabled"] is False
-    assert verdict["standing_order_switch_open"] is False
+    assert verdict["orders_enabled"] is True
+    assert verdict["standing_order_switch_open"] is True
     assert verdict["account_id"] == "90000001"
 
 
@@ -144,20 +144,18 @@ def test_local_window_bound_to_another_strategy_is_denied():
     assert verdict["reason"] == "LOCAL_AUTHORIZATION_STRATEGY_MISMATCH"
 
 
-def test_unreachable_coordinator_denies_even_with_an_armed_window():
+def test_unreachable_coordinator_does_not_block_local_execution():
     verdict = _admit(designation={"reachable": False, "eligible": False, "reason": "URLError"})
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "COORDINATOR_UNREACHABLE"
+    assert verdict["allowed"] is True
+    assert verdict["coordinator_mode"] == "MONITOR_ONLY"
     verdict_without_designation = _admit(designation=None)
-    assert verdict_without_designation["allowed"] is False
-    assert verdict_without_designation["reason"] == "COORDINATOR_UNREACHABLE"
+    assert verdict_without_designation["allowed"] is True
 
 
-def test_host_not_designated_as_executor_is_denied():
+def test_host_not_designated_as_executor_does_not_block_local_execution():
     verdict = _admit(designation=_designation(eligible=False, reason="HOST_NOT_ELIGIBLE"))
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "COORDINATOR_DENIES_HOST"
-    assert verdict["coordinator_reason"] == "HOST_NOT_ELIGIBLE"
+    assert verdict["allowed"] is True
+    assert verdict["coordinator_mode"] == "MONITOR_ONLY"
 
 
 def test_valid_lease_still_cannot_open_execution_in_this_milestone():

@@ -35,17 +35,52 @@ class RuntimeControl:
             value = {}
         if str(value.get("environment", "")).lower() != self.environment.lower():
             return self._default("missing, malformed, or wrong-environment control state")
-        # Production never has a writable runtime mode.  Simulation can only
-        # be armed through ``arm_simulation_strategy`` below, and only for a
-        # short-lived, account-bound window.  A stale or partial file fails
-        # closed rather than preserving an old ability to submit an order.
+        # Production never has a writable runtime mode.  Simulation execution
+        # is a persistent, local operator setting.  Coordinator is not part
+        # of this gate; it only observes the resulting state.
         if self.environment.lower() != "simulation":
             return self._locked(value, "production runtime is permanently read-only")
-        if not self._is_valid_simulation_window(value):
+        if not self._is_valid_simulation_enabled(value):
             return self._locked(
                 value,
-                str(value.get("lock_reason") or "simulation execution window is missing, expired, or incomplete"),
+                str(value.get("lock_reason") or "simulation local execution authorization is missing or incomplete"),
             )
+        return value
+
+    def enable_simulation_strategy(
+        self, *, account_id: str, strategy_id: str, approval_scope: str,
+    ) -> dict[str, Any]:
+        """Enable local simulation execution until an operator locks it.
+
+        This writes local state only.  It has no expiry and never contacts the
+        Coordinator, Redis, QMT, or a broker.  The persistent order Key,
+        strategy switch, market-hours gate, reconciliation, and bridge checks
+        remain mandatory at the actual order path.
+        """
+        if self.environment.lower() != "simulation":
+            raise PermissionError("only the simulation runtime can be enabled")
+        if not str(account_id).strip() or not str(strategy_id).strip():
+            raise ValueError("account_id and strategy_id are required")
+        now = time.time()
+        value = {
+            "schema_version": 3,
+            "environment": "SIMULATION",
+            "account_id": str(account_id).strip(),
+            "mode": "SIMULATION_STRATEGY_EXECUTION_ENABLED",
+            "orders_enabled": True,
+            "execution_consumer_enabled": True,
+            "preflight_admission": "ALLOWED",
+            "parity_admission": "ALLOWED",
+            "simulation_confirmation": "SIMULATION_ORDER_VALIDATED",
+            "simulation_verified": False,
+            "production_execution_approved": False,
+            "production_confirmation": "",
+            "strategy_id": str(strategy_id).strip(),
+            "approval_scope": str(approval_scope).strip(),
+            "enabled_at_epoch": now,
+            "coordinator_mode": "MONITOR_ONLY",
+        }
+        _atomic_json_write(self.control_path, value)
         return value
 
     def arm_simulation_strategy(
@@ -56,44 +91,10 @@ class RuntimeControl:
         approval_scope: str,
         valid_for_seconds: int = 120,
     ) -> dict[str, Any]:
-        """Create one short, simulation-only QMT execution window.
-
-        This does not contact Redis or QMT and it never works for the formal
-        profile.  The caller must complete live quote/account/preflight checks
-        *before* arming it, and must lock it again after a submit response or
-        timeout.  The capped duration prevents a Tray restart from leaving an
-        old order permission behind.
-        """
-        if self.environment.lower() != "simulation":
-            raise PermissionError("only the simulation runtime can be armed")
-        if not str(account_id).strip() or not str(strategy_id).strip():
-            raise ValueError("account_id and strategy_id are required")
-        duration = int(valid_for_seconds)
-        if duration < 10 or duration > 300:
-            raise ValueError("valid_for_seconds must be between 10 and 300")
-        now = time.time()
-        value = {
-            "schema_version": 2,
-            "environment": "SIMULATION",
-            "account_id": str(account_id).strip(),
-            "mode": "SIMULATION_STRATEGY_EXECUTION_WINDOW",
-            "valid_until_epoch": now + duration,
-            "orders_enabled": True,
-            "execution_consumer_enabled": True,
-            "preflight_admission": "ALLOWED",
-            # This admits the separately approved QMT implementation boundary;
-            # it does not claim PTrade tick/data parity.
-            "parity_admission": "ALLOWED",
-            "simulation_confirmation": "SIMULATION_ORDER_VALIDATED",
-            "simulation_verified": False,
-            "production_execution_approved": False,
-            "production_confirmation": "",
-            "strategy_id": str(strategy_id).strip(),
-            "approval_scope": str(approval_scope).strip(),
-            "armed_at_epoch": now,
-        }
-        _atomic_json_write(self.control_path, value)
-        return value
+        """Backward-compatible alias; duration is intentionally ignored."""
+        return self.enable_simulation_strategy(
+            account_id=account_id, strategy_id=strategy_id, approval_scope=approval_scope
+        )
 
     def lock_orders(self, reason: str) -> dict[str, Any]:
         value = {
@@ -126,6 +127,23 @@ class RuntimeControl:
             and str(value.get("simulation_confirmation") or "") == "SIMULATION_ORDER_VALIDATED"
             and valid_until > time.time()
         )
+
+    @staticmethod
+    def _is_valid_simulation_enabled(value: dict[str, Any]) -> bool:
+        persistent = (
+            str(value.get("environment") or "").upper() == "SIMULATION"
+            and str(value.get("mode") or "") == "SIMULATION_STRATEGY_EXECUTION_ENABLED"
+            and str(value.get("account_id") or "").strip() != ""
+            and str(value.get("strategy_id") or "").strip() != ""
+            and value.get("orders_enabled") is True
+            and value.get("execution_consumer_enabled") is True
+            and str(value.get("preflight_admission") or "").upper() == "ALLOWED"
+            and str(value.get("parity_admission") or "").upper() == "ALLOWED"
+            and str(value.get("simulation_confirmation") or "") == "SIMULATION_ORDER_VALIDATED"
+        )
+        # Read old state files during migration, but never create new expiring
+        # windows.  Existing operators can lock and re-enable to migrate.
+        return persistent or RuntimeControl._is_valid_simulation_window(value)
 
     @staticmethod
     def _locked(value: dict[str, Any], reason: str) -> dict[str, Any]:

@@ -5,10 +5,9 @@ this module immediately before it writes an RPC request.  The gate is
 deliberately narrow:
 
   * a formal (production) account is denied unconditionally,
-  * the local runtime control must already be armed for this exact
-    environment/account/strategy and still be inside its short window,
-  * the Coordinator (read-only preview) must designate this host as the
-    eligible executor for the account; an unreachable Coordinator denies,
+  * the local runtime control must already be enabled for this exact
+    environment/account/strategy,
+  * the Coordinator is monitor-only and is never an execution dependency,
   * a lease envelope cannot open execution yet, because leased execution is
     not part of the current milestone.
 
@@ -36,7 +35,8 @@ from .host_agent_account_policy import (
 
 
 SIMULATION_ENVIRONMENT = "SIMULATION"
-SIMULATION_WINDOW_MODE = "SIMULATION_STRATEGY_EXECUTION_WINDOW"
+SIMULATION_WINDOW_MODE = "SIMULATION_STRATEGY_EXECUTION_WINDOW"  # legacy
+SIMULATION_ENABLED_MODE = "SIMULATION_STRATEGY_EXECUTION_ENABLED"
 ADMITTED_REASON = "ADMITTED_SIMULATION_SINGLE_WRITER"
 
 
@@ -103,18 +103,20 @@ def _authorization_denial(
         return "LOCAL_AUTHORIZATION_MISSING"
     if str(authorization.get("environment") or "").upper() != SIMULATION_ENVIRONMENT:
         return "LOCAL_AUTHORIZATION_ENVIRONMENT_MISMATCH"
-    if str(authorization.get("mode") or "") != SIMULATION_WINDOW_MODE:
+    mode = str(authorization.get("mode") or "")
+    if mode not in {SIMULATION_WINDOW_MODE, SIMULATION_ENABLED_MODE}:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
     if authorization.get("orders_enabled") is not True:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
     if authorization.get("execution_consumer_enabled") is not True:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
-    try:
-        valid_until = float(authorization.get("valid_until_epoch") or 0)
-    except (TypeError, ValueError):
-        return "LOCAL_AUTHORIZATION_NOT_ARMED"
-    if valid_until <= now_epoch:
-        return "LOCAL_AUTHORIZATION_EXPIRED"
+    if mode == SIMULATION_WINDOW_MODE:
+        try:
+            valid_until = float(authorization.get("valid_until_epoch") or 0)
+        except (TypeError, ValueError):
+            return "LOCAL_AUTHORIZATION_NOT_ARMED"
+        if valid_until <= now_epoch:
+            return "LOCAL_AUTHORIZATION_EXPIRED"
     # Account and strategy binding are checked only once a real armed window
     # exists, so a locked control file reports the truthful NOT_ARMED state.
     if str(authorization.get("account_id") or "").strip() != account_id:
@@ -186,19 +188,9 @@ def evaluate_execution_admission(
     if denial is not None:
         return _deny(denial, **base)
 
-    if not isinstance(designation, Mapping) or not designation.get("reachable"):
-        return _deny(
-            "COORDINATOR_UNREACHABLE",
-            coordinator_reason=str((designation or {}).get("reason", "NOT_CONTACTED")),
-            **base,
-        )
-    if not designation.get("eligible"):
-        return _deny(
-            "COORDINATOR_DENIES_HOST",
-            coordinator_reason=str(designation.get("reason", "NOT_ELIGIBLE")),
-            coordinator_lease_state=str(designation.get("lease_state", "UNKNOWN")),
-            **base,
-        )
+    # Coordinator is deliberately excluded from local admission.  Its
+    # designation is retained only as an optional monitoring annotation.
+    monitor_designation = dict(designation or {}) if isinstance(designation, Mapping) else {}
 
     if lease_envelope is not None:
         # A lease is only audited here: leased execution is a later milestone,
@@ -219,11 +211,12 @@ def evaluate_execution_admission(
 
     verdict = {
         "allowed": True,
-        "orders_enabled": False,
-        "standing_order_switch_open": False,
+        "orders_enabled": True,
+        "standing_order_switch_open": True,
         "reason": ADMITTED_REASON,
-        "coordinator_lease_state": str(designation.get("lease_state", "UNKNOWN")),
-        "coordinator_candidate_reason": str(designation.get("reason", "NOT_REPORTED")),
+        "coordinator_mode": "MONITOR_ONLY",
+        "coordinator_lease_state": str(monitor_designation.get("lease_state", "NOT_REQUIRED")),
+        "coordinator_candidate_reason": str(monitor_designation.get("reason", "NOT_REQUIRED")),
         "checked_at_epoch": moment,
     }
     verdict.update(base)
@@ -252,34 +245,22 @@ def require_admission_for_root(
     Scripts call this immediately before writing an order RPC request.
     """
     root = Path(root)
-    endpoint, host_id = resolve_coordinator(root)
+    _endpoint, host_id = resolve_coordinator(root)
     # The account is deployment-local (machine.local.json), not the synthetic
     # repository default.  Passing it here keeps the armed control window and
     # the admission policy bound to the same real simulation account.
     gateway = load_gateway(root, profile)
     account_id = str(gateway.get("account_id") or "").strip() or None
     local_key = order_authorization_key_status(profile, account_id)
-    designation = coordinator_designation(endpoint, profile, host_id, timeout=timeout)
-    # The Coordinator is a coordination/observability service, not the Redis
-    # order transport.  This deployment explicitly keeps it optional for the
-    # single local simulation account.  All local gates above the RPC remain
-    # mandatory; formal profiles never use this fallback.
-    machine = load_machine_local(root)
-    coordinator_config = machine.get("coordinator") if isinstance(machine, dict) else {}
-    simulation_coordinator_optional = (
-        profile == "simulation"
-        and isinstance(coordinator_config, dict)
-        and coordinator_config.get("simulation_execution_required") is False
-    )
-    if simulation_coordinator_optional and not bool(designation.get("eligible")):
-        designation = dict(designation)
-        designation.update({
-            "reachable": True,
-            "eligible": True,
-            "lease_state": "LOCAL_SIMULATION_SINGLE_WRITER",
-            "reason": "COORDINATOR_OPTIONAL_LOCAL_FALLBACK:%s" % str(designation.get("reason", "NOT_ELIGIBLE")),
-            "fallback_used": True,
-        })
+    # Do not contact Coordinator here.  It is a monitor-only service.  The
+    # local authorization Key and runtime state are the execution authority.
+    designation = {
+        "reachable": True,
+        "eligible": True,
+        "lease_state": "LOCAL_SIMULATION_EXECUTOR",
+        "reason": "COORDINATOR_MONITOR_ONLY",
+        "monitor_only": True,
+    }
     return require_execution_admission(
         profile,
         account_id=account_id,

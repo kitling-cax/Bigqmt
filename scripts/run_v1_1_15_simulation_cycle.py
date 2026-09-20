@@ -188,11 +188,14 @@ def main() -> int:
         control = RuntimeControl(ROOT / "runtime_data" / "control" / "simulation" / "runtime_control.json")
         response: dict[str, Any] | None = None
         try:
-            control.arm_simulation_strategy(account_id=account_id, strategy_id=STRATEGY_ID,
-                                            approval_scope="Tray-owned v1.1.15 simulation cycle", valid_for_seconds=120)
-            # Single fail-closed order gate: formal accounts, a missing or
-            # expired local window, and a Coordinator that does not designate
-            # this host all deny before any RPC write happens.
+            control.enable_simulation_strategy(
+                account_id=account_id,
+                strategy_id=STRATEGY_ID,
+                approval_scope="Tray-owned v1.1.15 simulation cycle",
+            )
+            # Single fail-closed local order gate: formal accounts, a missing
+            # local authorization Key, a locked runtime, and failed preflight
+            # deny before any RPC write. Coordinator is monitor-only.
             report["execution_admission"] = require_admission_for_root(
                 ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
             )
@@ -216,11 +219,10 @@ def main() -> int:
                 })
             report["attempt_finalization"] = store.finish_strategy_execution_attempt(plan["signal_id"], final_state, response)
             report["status"] = final_state
-        finally:
-            control.lock_orders("v1.1.15 Tray cycle finished; reconcile broker facts before another order")
         path = _write_evidence(report)
         print(json.dumps({"status": report["status"], "plan": plan, "response": response,
-                          "evidence": str(path), "broker_call_made": True, "orders_enabled": False}, ensure_ascii=False, indent=2))
+                          "evidence": str(path), "broker_call_made": True,
+                          "orders_enabled": control.status().get("orders_enabled", False)}, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "SUBMITTED" else 2
     except Exception as exc:
         # A local admission/configuration failure happens before any broker

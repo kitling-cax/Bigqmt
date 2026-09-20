@@ -100,25 +100,21 @@ def main() -> int:
         return 0
     control = RuntimeControl(ROOT / "runtime_data" / "control" / "simulation" / "runtime_control.json")
     response = None
-    try:
-        control.arm_simulation_strategy(
-            account_id=ACCOUNT_ID, strategy_id=STRATEGY_ID,
-            approval_scope="2026-09-11 explicit user-authorized v1.1.15 simulation entry activation",
-            valid_for_seconds=120,
-        )
-        evidence["execution_admission"] = require_admission_for_root(
-            ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
-        )
-        signal_id = "v1_1_15-entry-%s-%s" % (event["signal_day"], uuid.uuid4().hex[:10])
-        response = rpc_submit(redis, {
-            "account_id": ACCOUNT_ID, "action": "BUY", "stock_code": plan["stock_code"],
-            "volume": int(plan["quantity"]), "price": float(plan["limit_price"]), "price_type": "LIMIT",
-            "strategy_name": STRATEGY_ID, "signal_id": signal_id, "remark": signal_id,
-        })
-        evidence["response"] = response
-        evidence["no_retry_on_timeout"] = True
-    finally:
-        control.lock_orders("v1.1.15 simulation entry response received or timed out; reconcile before another order")
+    control.enable_simulation_strategy(
+        account_id=ACCOUNT_ID, strategy_id=STRATEGY_ID,
+        approval_scope="2026-09-11 explicit user-authorized v1.1.15 simulation entry activation",
+    )
+    evidence["execution_admission"] = require_admission_for_root(
+        ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
+    )
+    signal_id = "v1_1_15-entry-%s-%s" % (event["signal_day"], uuid.uuid4().hex[:10])
+    response = rpc_submit(redis, {
+        "account_id": ACCOUNT_ID, "action": "BUY", "stock_code": plan["stock_code"],
+        "volume": int(plan["quantity"]), "price": float(plan["limit_price"]), "price_type": "LIMIT",
+        "strategy_name": STRATEGY_ID, "signal_id": signal_id, "remark": signal_id,
+    })
+    evidence["response"] = response
+    evidence["no_retry_on_timeout"] = True
     directory = ROOT / "runtime_data" / "evidence" / "simulation" / "strategy_execution"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("v1_1_15_entry_%s.json" % datetime.now().strftime("%Y%m%d_%H%M%S"))
