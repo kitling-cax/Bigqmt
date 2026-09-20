@@ -29,6 +29,8 @@ git merge --no-edit origin/feature/strategy-deployment
 git merge --no-edit origin/feature/tray-strategy-control
 ```
 
+**注意（2026-09-20）：** 后续 Coordinator 可见性更新在 `feature/strategy-visibility-20260920`，它建于旧基线、**不含**授权 Key/策略开关/删除策略功能。**不要 `git switch` 到该分支**（会把这些删掉）；改用 `git merge --no-edit origin/feature/strategy-visibility-20260920` 合并进本机分支。合并时有 187 文档 / checksum 两个冲突：`docs/187_*` 取 visibility 版（多主机仅网页告警、不删 Key 不停策略），`tray/BigQMT_native_tray_checksums.sha256` 取本机构建重生成的值即可。
+
 若 merge 冲突，停下来不猜；把冲突文件名和 `git diff --check` 输出报告给 105/125，不要自己乱解。
 
 ### 1.5 处理工作区行尾噪音（仅当 `git status --porcelain` 非空时）
