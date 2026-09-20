@@ -44,6 +44,16 @@ git diff --ignore-cr-at-eol config/strategy_runtime_policy.json
 
 ### 2. 无头验证（先确认 Python 链路通，再动 GUI）
 
+先安装托盘声明的 Python 依赖（重点 `pywin32`，缺失会导致授权 Key 报 `CREDENTIAL_STORE_UNAVAILABLE`）：
+
+```powershell
+py -3.12 -m pip install -r requirements-tray.txt
+py -3.12 -c "import win32cred"
+# 期望无输出、退出码 0；有 ImportError 则先解决依赖再继续
+```
+
+然后跑被测集与无头 verifier：
+
 ```powershell
 py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog_page.py tests/test_uninstall_strategy_package.py tests/test_set_strategy_auto_run.py tests/test_strategy_deployment_poll.py -q
 py -3.12 scripts/verify_host_tray_features.py
