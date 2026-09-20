@@ -79,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_native_account
 - Key 绑定错误：托盘显示账户不匹配，订单入口拒绝；
 - 删除 Key：无需重启托盘，立即恢复只读；
 - 日志、Git diff、诊断报告和进程命令行中均不存在 Key 明文；
-- 同一账户在两台主机都安装 Key 时，Coordinator 冲突检查仍必须拒绝执行，并发出多执行候选告警；
+- 同一账户在两台主机都安装 Key 时，Coordinator 只在网页显示告警，不自动降级、不自动删除 Key、不自动阻断订单；
 - 正式 `production_readonly` 在现阶段即使安装 Key，仍不能下单。
 
 ## 7. 回滚

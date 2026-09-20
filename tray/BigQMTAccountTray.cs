@@ -462,7 +462,22 @@ internal static class BigQMTAccountTray
         // Coordinator receives a sanitized read-only service snapshot only.
         // The helper has no QMT, Redis, credential, order or shell interface.
         string signature = qmt + "/" + miniQmt + "/" + redis + "/" + dashboard + "/" + bridgeLiveHealthy;
+        // Strategy execution visibility is an observation only.  It reports
+        // local policy and liveness, never a Key, credential, order or intent.
+        string observedStrategy = Profile == "simulation" ? StrategyIdV1115 : "BIGQMT_BRIDGE";
+        string observedVersion = Profile == "simulation" ? "v1.1.15" : "0.3.26";
+        bool policyEnabled = Profile == "simulation" ? StrategyAutoRunEnabled(StrategyIdV1115) : StrategyPolicyEnabled();
+        string strategyState = !policyEnabled ? "STOPPED" : (bridgeLiveHealthy ? "RUNNING" : "DEGRADED");
         bool ok;
+        // Append observability arguments in a second invocation-compatible
+        // command construction.  Keeping them as scalar allow-listed values
+        // prevents local paths or secrets entering the heartbeat envelope.
+        string observableArgs = " --strategy-id \"" + observedStrategy + "\""
+            + " --strategy-version \"" + observedVersion + "\""
+            + " --strategy-state " + strategyState
+            + " --strategy-policy-enabled " + (policyEnabled ? "true" : "false")
+            + " --authorization-key-state " + lastAuthorizationKeyState
+            + " --bridge-version \"" + (Profile == "production_readonly" ? "0.3.26" : "") + "\"";
         string output = RunPython(
             "send_host_agent_heartbeat.py",
             "--profile " + Profile
@@ -470,7 +485,7 @@ internal static class BigQMTAccountTray
             + " --miniqmt " + (miniQmt == "RUNNING" ? "UP" : "DOWN")
             + " --redis " + (redis ? "UP" : "DOWN")
             + " --bridge " + (bridgeLiveHealthy ? "UP" : "DOWN")
-            + " --dashboard " + (dashboard ? "UP" : "DOWN"),
+            + " --dashboard " + (dashboard ? "UP" : "DOWN") + observableArgs,
             6000,
             out ok
         );

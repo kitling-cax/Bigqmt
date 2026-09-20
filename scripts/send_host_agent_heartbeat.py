@@ -46,6 +46,12 @@ def main() -> int:
     parser.add_argument("--bridge", choices=tuple(ALLOWED), required=True)
     parser.add_argument("--dashboard", choices=tuple(ALLOWED), required=True)
     parser.add_argument("--tray", choices=("UP",), default="UP")
+    parser.add_argument("--strategy-id", default="")
+    parser.add_argument("--strategy-version", default="")
+    parser.add_argument("--strategy-state", choices=("RUNNING", "STOPPED", "DEGRADED", "UNKNOWN"), default="UNKNOWN")
+    parser.add_argument("--strategy-policy-enabled", choices=("true", "false"), default="false")
+    parser.add_argument("--authorization-key-state", default="UNKNOWN")
+    parser.add_argument("--bridge-version", default="")
     args = parser.parse_args()
 
     endpoint, host_id = resolve_coordinator(ROOT)
@@ -57,8 +63,15 @@ def main() -> int:
         "dashboard": args.dashboard,
         "tray": args.tray,
     }
+    instances = []
+    if args.strategy_id.strip():
+        instances.append({"strategy_id": args.strategy_id.strip(), "version": args.strategy_version,
+                          "state": args.strategy_state, "policy_enabled": args.strategy_policy_enabled == "true",
+                          "authorization_key_state": args.authorization_key_state,
+                          "bridge_version": args.bridge_version})
     result = HostAgentClient(endpoint, host_id).heartbeat(
-        services, account_ids=[configured_account(args.profile)], version="native-tray-v1"
+        services, account_ids=[configured_account(args.profile)], version="native-tray-v1",
+        strategy_instances=instances,
     )
     print(json.dumps({"profile": args.profile, "services": services, "result": result}, ensure_ascii=False))
     return 0
