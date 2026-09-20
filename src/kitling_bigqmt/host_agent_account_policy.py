@@ -39,7 +39,12 @@ class AccountPolicy:
     production_readonly: bool
 
 
-def resolve_account_policy(profile: str, account_id: str | None = None) -> AccountPolicy:
+def resolve_account_policy(
+    profile: str,
+    account_id: str | None = None,
+    *,
+    configured_account_id: str | None = None,
+) -> AccountPolicy:
     """Resolve and validate a profile without opening any execution path.
 
     orders_enabled and execution_allowed are always False in the current
@@ -49,7 +54,8 @@ def resolve_account_policy(profile: str, account_id: str | None = None) -> Accou
     """
     if profile not in ACCOUNT_BY_PROFILE:
         raise AccountPolicyRejected("unknown profile: %s" % profile)
-    expected_account_id = ACCOUNT_BY_PROFILE[profile]
+    configured = str(configured_account_id or "").strip()
+    expected_account_id = configured or ACCOUNT_BY_PROFILE[profile]
     if account_id is not None and str(account_id) != expected_account_id:
         raise AccountPolicyRejected(
             "account %s does not match profile %s" % (account_id, profile)
@@ -73,6 +79,7 @@ def evaluate_local_execution(
     lease_envelope: dict[str, Any] | None = None,
     trusted_transport: bool = False,
     now_epoch: float | None = None,
+    configured_account_id: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate one local execution decision and always fail closed in M03.
 
@@ -80,7 +87,9 @@ def evaluate_local_execution(
     allowed remains False even when a syntactically valid simulation lease is
     supplied, because M03 does not yet include leased execution.
     """
-    policy = resolve_account_policy(profile, account_id)
+    policy = resolve_account_policy(
+        profile, account_id, configured_account_id=configured_account_id
+    )
     if policy.production_readonly:
         return {
             "profile": policy.profile,

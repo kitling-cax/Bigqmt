@@ -65,8 +65,13 @@ def _validate_registry_entry(registry: dict[str, Any], strategy_id: str) -> dict
     entry = matches[0]
     if entry.get("formal_account_allowed") is not False:
         raise PackageError("formal_account_allowed must be false")
-    if entry.get("execution_enabled") is True and entry.get("allowed_accounts") != ["99022040"]:
-        raise PackageError("enabled package is restricted to simulation account 99022040")
+    if entry.get("execution_enabled") is True:
+        allowed_accounts = entry.get("allowed_accounts")
+        if (entry.get("status") != "SIMULATION_ONLY" or
+                not isinstance(allowed_accounts, list) or
+                len(allowed_accounts) != 1 or
+                not str(allowed_accounts[0]).strip()):
+            raise PackageError("enabled package must name exactly one simulation-only account")
     return entry
 
 
