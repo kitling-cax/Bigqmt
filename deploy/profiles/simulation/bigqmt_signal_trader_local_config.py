@@ -25,9 +25,9 @@ BIGQMT_REDIS_CONFIG = {
     "exec_events_enabled": True,
     "execution_admission": {
         "environment": "SIMULATION",
-        "expected_qmt_python_dir": r"C:\BigQMT\work\国金QMT交易端模拟\python",
+        "expected_qmt_python_dir": r"qmt\simulation\python",
         "runtime_control_required": True,
-        "runtime_control_path": r"C:\BigQMT\work\kitling_bigqmt\runtime_data\control\simulation\runtime_control.json",
+        "runtime_control_path": r"runtime_data\control\simulation\runtime_control.json",
         "orders_enabled": False,
         "execution_consumer_enabled": False,
         "preflight_admission": "BLOCKED",

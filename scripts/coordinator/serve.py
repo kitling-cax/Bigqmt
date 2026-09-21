@@ -44,9 +44,15 @@ ACCOUNT_POLICY = {
     "90000001": {"mode": "SIMULATION", "execution_eligible": True},
     "90000002": {"mode": "PRODUCTION_READ_ONLY", "execution_eligible": False},
 }
-# Deployment account IDs are normalized to the stable internal profile keys so
-# a portable Coordinator keeps one simulation and one formal entry.
-ACCOUNT_ALIASES = {"99022040": "90000001", "8890526688": "90000002"}
+# Real account aliases are private deployment configuration.  The public
+# repository only carries synthetic defaults; production deployments should
+# set BIGQMT_ACCOUNT_ALIASES to a JSON object in the service environment.
+try:
+    ACCOUNT_ALIASES = json.loads(os.environ.get("BIGQMT_ACCOUNT_ALIASES", "{}"))
+    if not isinstance(ACCOUNT_ALIASES, dict):
+        ACCOUNT_ALIASES = {}
+except json.JSONDecodeError:
+    ACCOUNT_ALIASES = {}
 REQUIRED_EXECUTOR_SERVICES = ("qmt", "redis", "bridge", "tray")
 
 

@@ -9,7 +9,7 @@
 
 ## 本机持久执行状态
 
-模拟账户 99022040 的 v1.1.15 使用：
+本机 `machine.local.json` 配置的模拟账户 v1.1.15 使用：
 
 ```text
 runtime_data/control/simulation/runtime_control.json

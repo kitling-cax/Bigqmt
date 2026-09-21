@@ -1,6 +1,6 @@
 {
   "environment": "production",
-  "account_id": "8890526688",
+  "account_id": "90000002",
   "account_type": "STOCK",
   "read_only": true,
   "redis": {

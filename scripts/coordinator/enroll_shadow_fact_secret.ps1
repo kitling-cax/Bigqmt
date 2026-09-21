@@ -4,7 +4,7 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$SecretFile,
 
-    [string]$CoordinatorHost = 'kitling@192.168.1.121',
+    [string]$CoordinatorHost = $(if ($env:BIGQMT_COORDINATOR_SSH_HOST) { $env:BIGQMT_COORDINATOR_SSH_HOST } else { 'kitling@COORDINATOR_HOST' }),
     [string]$RemoteScript = '/home/kitling/bin/bigqmt-enroll-fact-host.sh'
 )
 

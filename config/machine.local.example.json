@@ -6,7 +6,7 @@
     "runtime_reads_nas": false,
     "comment": "Metadata written by bootstrap_private_config.py. Runtime uses the local cache only."
   },
-  "data_directory": "C:/BigQMT/work/kitling_bigqmt/runtime_data",
+  "data_directory": "runtime_data",
   "coordinator": {
     "endpoint": "http://192.0.2.121:18443",
     "host_id": "REPLACE_WITH_THIS_WINDOWS_HOST_IP"
@@ -17,13 +17,13 @@
   },
   "environments": {
     "simulation": {
-      "qmt_root": "C:/BigQMT/work/国金QMT交易端模拟",
+      "qmt_root": "qmt/simulation",
       "redis": { "host": "127.0.0.1", "port": 6379, "db": 5 },
       "dashboard_port": 17890,
       "ready_port": 58600
     },
     "production_readonly": {
-      "qmt_root": "C:/BigQMT/work/国金证券QMT交易端",
+      "qmt_root": "qmt/production_readonly",
       "redis": { "host": "127.0.0.1", "port": 6380, "db": 5 },
       "dashboard_port": 17891,
       "ready_port": 58600

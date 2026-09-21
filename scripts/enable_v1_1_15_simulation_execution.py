@@ -16,15 +16,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from kitling_bigqmt.order_authorization_key import status as key_status
 from kitling_bigqmt.runtime_control import RuntimeControl
+from kitling_bigqmt.machine_config import load_gateway
 
 
 STRATEGY_ID = "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15"
-ACCOUNT_ID = "99022040"
+ACCOUNT_ID = "90000001"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--account-id", default=ACCOUNT_ID)
+    configured = str((load_gateway(ROOT, "simulation") or {}).get("account_id") or ACCOUNT_ID)
+    parser.add_argument("--account-id", default=configured)
     parser.add_argument("--strategy-id", default=STRATEGY_ID)
     args = parser.parse_args()
     state = key_status("simulation", args.account_id)

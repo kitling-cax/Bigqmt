@@ -25,8 +25,8 @@ ACCOUNT_BY_PROFILE = {
 # These deployment IDs are explicitly accepted when supplied by the local
 # machine overlay; they are not interchangeable across profiles.
 DEPLOYMENT_ACCOUNT_BY_PROFILE = {
-    "simulation": "99022040",
-    "production_readonly": "8890526688",
+    "simulation": "90000001",
+    "production_readonly": "90000002",
 }
 PRODUCTION_PROFILE = "production_readonly"
 PRODUCTION_ACCOUNT_ID = ACCOUNT_BY_PROFILE[PRODUCTION_PROFILE]

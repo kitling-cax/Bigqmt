@@ -14,9 +14,9 @@ releases\bridge\kitling-bigqmt-bridge-20260909-rc3\
 └─ BIGQMT_BRIDGE_PRODUCTION_CAPABLE_LOCKED.zip
 ```
 
-模拟账户：`99022040`，本机 Redis `127.0.0.1:6379`。
+模拟账户：由本机私有 `machine.local.json` 注入，本机 Redis `127.0.0.1:6379`。
 
-正式账户：`8890526688`，本机 Redis `127.0.0.1:6380`。
+正式账户：由本机私有 `machine.local.json` 注入，本机 Redis `127.0.0.1:6380`。
 
 两个 Redis 都是本机服务，不要把 Redis 端口改成另一台电脑的地址。
 

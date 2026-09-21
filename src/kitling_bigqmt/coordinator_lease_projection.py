@@ -9,8 +9,8 @@ ACCOUNT_BY_PROFILE = {
     "production_readonly": "90000002",
 }
 DEPLOYMENT_ACCOUNT_BY_PROFILE = {
-    "simulation": "99022040",
-    "production_readonly": "8890526688",
+    "simulation": "90000001",
+    "production_readonly": "90000002",
 }
 
 
