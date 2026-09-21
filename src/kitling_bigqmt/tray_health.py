@@ -125,7 +125,14 @@ def check_profile(root: Path, profile: str, dashboard_port: int = 17890, timeout
     checks.append(_redis_health(config, timeout, attempts) if config else _check("redis", "BLOCKED", "profile config unavailable"))
     checks.append(_bridge_snapshot_health(config) if config else _check("bridge_snapshot", "BLOCKED", "profile config unavailable"))
     control = RuntimeControl(control_path, environment="simulation" if profile == "simulation" else "production").status()
-    checks.append(_check("order_lock", "PASS" if control.get("orders_enabled") is False and control.get("execution_consumer_enabled") is False else "FAIL", control.get("mode", "unknown")))
+    local_simulation_enabled = (
+        profile == "simulation"
+        and control.get("mode") == "SIMULATION_STRATEGY_EXECUTION_ENABLED"
+        and control.get("orders_enabled") is True
+        and control.get("execution_consumer_enabled") is True
+    )
+    locked = control.get("orders_enabled") is False and control.get("execution_consumer_enabled") is False
+    checks.append(_check("order_lock", "PASS" if local_simulation_enabled or locked else "FAIL", control.get("mode", "unknown")))
     checks.append(_dashboard_health(profile, dashboard_port, timeout, attempts))
     failed = [item for item in checks if item["status"] in {"FAIL", "BLOCKED"}]
     deferred = [item for item in checks if item["status"] in {"DEFERRED", "DEGRADED"}]
@@ -133,7 +140,7 @@ def check_profile(root: Path, profile: str, dashboard_port: int = 17890, timeout
     return {
         "profile": profile,
         "overall": overall,
-        "orders_enabled": False,
-        "execution_consumer_enabled": False,
+        "orders_enabled": bool(local_simulation_enabled),
+        "execution_consumer_enabled": bool(local_simulation_enabled),
         "checks": checks,
     }
