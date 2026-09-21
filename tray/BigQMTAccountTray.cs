@@ -44,6 +44,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem hostAgentItem;
     private static ToolStripMenuItem strategyDeploymentItem;
     private static ToolStripMenuItem strategyRuntimeItem;
+    private static ToolStripMenuItem currentStrategyItem;
     private static ToolStripMenuItem authorizationKeyItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
@@ -132,6 +133,7 @@ internal static class BigQMTAccountTray
         hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
         strategyDeploymentItem = new ToolStripMenuItem("策略部署：未同步（安装不启动）"); strategyDeploymentItem.Enabled = false; menu.Items.Add(strategyDeploymentItem);
         strategyRuntimeItem = new ToolStripMenuItem("策略运行状况：检查中"); strategyRuntimeItem.Enabled = false; menu.Items.Add(strategyRuntimeItem);
+        currentStrategyItem = new ToolStripMenuItem("当前运行策略：检查中"); currentStrategyItem.Enabled = false; menu.Items.Add(currentStrategyItem);
         authorizationKeyItem = new ToolStripMenuItem("下单授权 Key：检查中"); authorizationKeyItem.Enabled = false; menu.Items.Add(authorizationKeyItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
@@ -1486,24 +1488,36 @@ internal static class BigQMTAccountTray
         if (Profile != "simulation")
         {
             strategyRuntimeItem.Text = "策略运行状况：BIGQMT_BRIDGE｜正式只读｜策略恢复开关关闭";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：BIGQMT_BRIDGE（正式只读桥接，不执行交易）";
             return;
         }
         int installed = LocalInstalledCount();
         if (installed == 0)
         {
             strategyRuntimeItem.Text = "策略运行状况：未安装策略";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：无（未安装策略）";
             return;
         }
         bool enabled = StrategyAutoRunEnabled(StrategyIdV1115);
         if (!enabled)
         {
             strategyRuntimeItem.Text = "策略运行状况：v1.1.15 已停止｜策略开关关闭";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：无（v1.1.15 策略开关已关闭）";
             return;
         }
         string health = bridgeLiveHealthy ? "运行就绪" : "降级（Bridge 不可用）";
         strategyRuntimeItem.Text = "策略运行状况：v1.1.15 " + health
             + "｜自动运行开｜"
             + (lastAuthorizationKeyState == "VALID" && LocalSimulationExecutionEnabled() ? "模拟授权有效｜本机执行已开放" : "授权或本机执行未开放｜订单锁定");
+        if (currentStrategyItem != null)
+        {
+            string mode = lastAuthorizationKeyState == "VALID" && LocalSimulationExecutionEnabled()
+                ? "自动执行（模拟账户 " + Account + "）" : "信号对齐（订单锁定）";
+            currentStrategyItem.Text = "当前运行策略：v1.1.15 低频动量轮动（U25 无酒 5 日）｜" + mode;
+        }
     }
 
     private static bool LocalSimulationExecutionEnabled()
@@ -1795,7 +1809,9 @@ internal static class BigQMTAccountTray
             || lower.IndexOf("redis") >= 0 || lower.IndexOf("rpc") >= 0
             || lower.IndexOf("duplicate") >= 0 || lower.IndexOf("admission") >= 0
             || lower.IndexOf("open orders") >= 0
-            || lower.IndexOf("reconciliation") >= 0;
+            || lower.IndexOf("reconciliation") >= 0
+            || lower.IndexOf("syntaxerror") >= 0
+            || lower.IndexOf("traceback") >= 0;
         if (retryable)
         {
             nextExecutionAttempt = now.AddMinutes(2);

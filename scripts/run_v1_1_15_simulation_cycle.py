@@ -219,6 +219,7 @@ def main() -> int:
                 })
             report["attempt_finalization"] = store.finish_strategy_execution_attempt(plan["signal_id"], final_state, response)
             report["status"] = final_state
+        report["orders_enabled_after"] = control.status().get("orders_enabled", False)
         path = _write_evidence(report)
         print(json.dumps({"status": report["status"], "plan": plan, "response": response,
                           "evidence": str(path), "broker_call_made": True,
