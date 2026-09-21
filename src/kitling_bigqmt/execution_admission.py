@@ -27,6 +27,7 @@ from urllib.request import urlopen
 from .coordinator_endpoint import resolve_coordinator
 from .coordinator_lease_projection import project_local_lease
 from .machine_config import load_gateway
+from .machine_config import load_gateway, load_machine_local
 from .order_authorization_key import status as order_authorization_key_status
 from .host_agent_account_policy import (
     AccountPolicyRejected,
@@ -253,9 +254,33 @@ def require_admission_for_root(
     """
     root = Path(root)
     endpoint, host_id = resolve_coordinator(root)
-    account_id = str(load_gateway(root, profile).get("account_id") or "").strip() or None
+    # The account is deployment-local (machine.local.json), not the synthetic
+    # repository default.  Passing it here keeps the armed control window and
+    # the admission policy bound to the same real simulation account.
+    gateway = load_gateway(root, profile)
+    account_id = str(gateway.get("account_id") or "").strip() or None
     local_key = order_authorization_key_status(profile, account_id)
     designation = coordinator_designation(endpoint, profile, host_id, timeout=timeout)
+    # The Coordinator is a coordination/observability service, not the Redis
+    # order transport.  This deployment explicitly keeps it optional for the
+    # single local simulation account.  All local gates above the RPC remain
+    # mandatory; formal profiles never use this fallback.
+    machine = load_machine_local(root)
+    coordinator_config = machine.get("coordinator") if isinstance(machine, dict) else {}
+    simulation_coordinator_optional = (
+        profile == "simulation"
+        and isinstance(coordinator_config, dict)
+        and coordinator_config.get("simulation_execution_required") is False
+    )
+    if simulation_coordinator_optional and not bool(designation.get("eligible")):
+        designation = dict(designation)
+        designation.update({
+            "reachable": True,
+            "eligible": True,
+            "lease_state": "LOCAL_SIMULATION_SINGLE_WRITER",
+            "reason": "COORDINATOR_OPTIONAL_LOCAL_FALLBACK:%s" % str(designation.get("reason", "NOT_ELIGIBLE")),
+            "fallback_used": True,
+        })
     return require_execution_admission(
         profile,
         account_id=account_id,
