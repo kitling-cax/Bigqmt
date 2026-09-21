@@ -43,6 +43,7 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem intentItem;
     private static ToolStripMenuItem hostAgentItem;
     private static ToolStripMenuItem strategyDeploymentItem;
+    private static ToolStripMenuItem strategyRuntimeItem;
     private static ToolStripMenuItem authorizationKeyItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
@@ -130,6 +131,7 @@ internal static class BigQMTAccountTray
         intentItem = new ToolStripMenuItem("Intents：检查中（只读预览）"); intentItem.Enabled = false; menu.Items.Add(intentItem);
         hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
         strategyDeploymentItem = new ToolStripMenuItem("策略部署：未同步（安装不启动）"); strategyDeploymentItem.Enabled = false; menu.Items.Add(strategyDeploymentItem);
+        strategyRuntimeItem = new ToolStripMenuItem("策略运行状况：检查中"); strategyRuntimeItem.Enabled = false; menu.Items.Add(strategyRuntimeItem);
         authorizationKeyItem = new ToolStripMenuItem("下单授权 Key：检查中"); authorizationKeyItem.Enabled = false; menu.Items.Add(authorizationKeyItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
@@ -415,7 +417,9 @@ internal static class BigQMTAccountTray
         string detail = "Redis " + (redis ? "正常" : "不可达")
             + "｜看板 " + (dashboard ? "正常" : "不可达")
             + "｜" + snapshotFreshness
-            + "｜订单锁定";
+            + "｜" + (Profile == "simulation"
+                ? (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜当前订单窗口关闭" : "模拟授权缺失｜订单锁定")
+                : "正式只读｜订单锁定");
         statusItem.Text = ProfileTitle + " " + Account + "：" + state + "（" + detail + "）";
         qmtItem.Text = "QMT：" + (qmt == "RUNNING" ? "运行中（Bridge Ping 为账户链路证明）" : "未运行（将自动补拉）");
         miniQmtItem.Text = "MiniQMT：" + (miniQmt == "RUNNING" ? "运行中（免密，PROCESS ONLY）" : "未运行（将自动补拉）");
@@ -426,6 +430,7 @@ internal static class BigQMTAccountTray
         if (strategyDeploymentItem != null && lastStrategyDeploymentState.Length > 0)
             strategyDeploymentItem.Text = "策略部署：" + lastStrategyDeploymentState + "（安装不启动）";
         if (Profile == "simulation") RebuildStrategyPolicyMenu();
+        RefreshStrategyRuntimeStatus();
         RefreshCoordinatorPreview();
         RefreshCoordinatorIntentPreview();
         string tip = ProfileTitle + " " + Account + "｜" + state;
@@ -462,7 +467,22 @@ internal static class BigQMTAccountTray
         // Coordinator receives a sanitized read-only service snapshot only.
         // The helper has no QMT, Redis, credential, order or shell interface.
         string signature = qmt + "/" + miniQmt + "/" + redis + "/" + dashboard + "/" + bridgeLiveHealthy;
+        // Strategy execution visibility is an observation only.  It reports
+        // local policy and liveness, never a Key, credential, order or intent.
+        string observedStrategy = Profile == "simulation" ? StrategyIdV1115 : "BIGQMT_BRIDGE";
+        string observedVersion = Profile == "simulation" ? "v1.1.15" : "0.3.26";
+        bool policyEnabled = Profile == "simulation" ? StrategyAutoRunEnabled(StrategyIdV1115) : StrategyPolicyEnabled();
+        string strategyState = !policyEnabled ? "STOPPED" : (bridgeLiveHealthy ? "RUNNING" : "DEGRADED");
         bool ok;
+        // Append observability arguments in a second invocation-compatible
+        // command construction.  Keeping them as scalar allow-listed values
+        // prevents local paths or secrets entering the heartbeat envelope.
+        string observableArgs = " --strategy-id \"" + observedStrategy + "\""
+            + " --strategy-version \"" + observedVersion + "\""
+            + " --strategy-state " + strategyState
+            + " --strategy-policy-enabled " + (policyEnabled ? "true" : "false")
+            + " --authorization-key-state " + lastAuthorizationKeyState
+            + " --bridge-version \"" + (Profile == "production_readonly" ? "0.3.26" : "") + "\"";
         string output = RunPython(
             "send_host_agent_heartbeat.py",
             "--profile " + Profile
@@ -470,7 +490,7 @@ internal static class BigQMTAccountTray
             + " --miniqmt " + (miniQmt == "RUNNING" ? "UP" : "DOWN")
             + " --redis " + (redis ? "UP" : "DOWN")
             + " --bridge " + (bridgeLiveHealthy ? "UP" : "DOWN")
-            + " --dashboard " + (dashboard ? "UP" : "DOWN"),
+            + " --dashboard " + (dashboard ? "UP" : "DOWN") + observableArgs,
             6000,
             out ok
         );
@@ -1458,6 +1478,32 @@ internal static class BigQMTAccountTray
             : "本账户没有有效授权 Key，当前只能执行账户只读操作，不能下单。";
         MessageBox.Show(keyText, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
         Audit("order_lock_viewed", "authorization_key_state=" + lastAuthorizationKeyState + "; secret_logged=false");
+    }
+
+    private static void RefreshStrategyRuntimeStatus()
+    {
+        if (strategyRuntimeItem == null) return;
+        if (Profile != "simulation")
+        {
+            strategyRuntimeItem.Text = "策略运行状况：BIGQMT_BRIDGE｜正式只读｜策略恢复开关关闭";
+            return;
+        }
+        int installed = LocalInstalledCount();
+        if (installed == 0)
+        {
+            strategyRuntimeItem.Text = "策略运行状况：未安装策略";
+            return;
+        }
+        bool enabled = StrategyAutoRunEnabled(StrategyIdV1115);
+        if (!enabled)
+        {
+            strategyRuntimeItem.Text = "策略运行状况：v1.1.15 已停止｜策略开关关闭";
+            return;
+        }
+        string health = bridgeLiveHealthy ? "运行就绪" : "降级（Bridge 不可用）";
+        strategyRuntimeItem.Text = "策略运行状况：v1.1.15 " + health
+            + "｜自动运行开｜"
+            + (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜当前订单窗口关闭" : "授权缺失｜订单锁定");
     }
 
     private static void GenerateDiagnosis()

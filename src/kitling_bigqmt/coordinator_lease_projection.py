@@ -10,15 +10,27 @@ ACCOUNT_BY_PROFILE = {
 }
 
 
+def _deployment_account(profile: str) -> str:
+    """Real per-host account from gitignored machine.local.json (never committed)."""
+    try:
+        from . import machine_config
+
+        machine = machine_config.load_machine_local(machine_config.project_root())
+        return str(machine_config.machine_environment(machine, profile).get("account_id") or "").strip()
+    except Exception:
+        return ""
+
+
 def project_local_lease(preview: dict[str, Any], profile: str, host_id: str) -> dict[str, Any]:
     if profile not in ACCOUNT_BY_PROFILE:
         raise ValueError("unknown profile")
     if preview.get("mode") != "readonly-preview":
         raise ValueError("unexpected coordinator preview mode")
-    account_id = ACCOUNT_BY_PROFILE[profile]
-    entry = next((item for item in preview.get("accounts", []) if item.get("account_id") == account_id), None)
+    candidates = (ACCOUNT_BY_PROFILE[profile], _deployment_account(profile))
+    entry = next((item for item in preview.get("accounts", []) if item.get("account_id") in candidates), None)
     if not isinstance(entry, dict):
         raise ValueError("account is absent from preview")
+    account_id = str(entry.get("account_id"))
     candidate = next((item for item in entry.get("candidates", []) if item.get("host_id") == host_id), {})
     return {
         "profile": profile,

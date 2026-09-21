@@ -21,6 +21,21 @@ ACCOUNT_BY_PROFILE = {
     "simulation": "90000001",
     "production_readonly": "90000002",
 }
+# The repository defaults remain synthetic for tests and clean-room builds.
+# The real per-host account is never committed here: it is read at runtime
+# from gitignored config/machine.local.json (single-point override), the same
+# source the tray and the RPC bridge use.
+def _deployment_account_id(profile: str) -> str:
+    try:
+        from . import machine_config
+
+        machine = machine_config.load_machine_local(machine_config.project_root())
+        env = machine_config.machine_environment(machine, profile)
+        return str(env.get("account_id") or "").strip()
+    except Exception:
+        return ""
+
+
 PRODUCTION_PROFILE = "production_readonly"
 PRODUCTION_ACCOUNT_ID = ACCOUNT_BY_PROFILE[PRODUCTION_PROFILE]
 
@@ -56,14 +71,21 @@ def resolve_account_policy(
         raise AccountPolicyRejected("unknown profile: %s" % profile)
     configured = str(configured_account_id or "").strip()
     expected_account_id = configured or ACCOUNT_BY_PROFILE[profile]
-    if account_id is not None and str(account_id) != expected_account_id:
+    # Accept the synthetic repository id and the real machine.local id so the
+    # admission path stays bound to the actual deployment account.
+    accepted_ids = {expected_account_id, ACCOUNT_BY_PROFILE[profile]}
+    deployment = _deployment_account_id(profile)
+    if deployment:
+        accepted_ids.add(deployment)
+    if account_id is not None and str(account_id) not in accepted_ids:
         raise AccountPolicyRejected(
             "account %s does not match profile %s" % (account_id, profile)
         )
+    resolved_account_id = str(account_id) if account_id is not None else expected_account_id
     production_readonly = profile == PRODUCTION_PROFILE
     return AccountPolicy(
         profile=profile,
-        account_id=expected_account_id,
+        account_id=resolved_account_id,
         environment="production" if production_readonly else "simulation",
         orders_enabled=False,
         execution_allowed=False,

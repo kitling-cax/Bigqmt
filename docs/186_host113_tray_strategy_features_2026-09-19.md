@@ -29,6 +29,8 @@ git merge --no-edit origin/feature/strategy-deployment
 git merge --no-edit origin/feature/tray-strategy-control
 ```
 
+**注意（2026-09-20）：** 后续 Coordinator 可见性更新在 `feature/strategy-visibility-20260920`，它建于旧基线、**不含**授权 Key/策略开关/删除策略功能。**不要 `git switch` 到该分支**（会把这些删掉）；改用 `git merge --no-edit origin/feature/strategy-visibility-20260920` 合并进本机分支。合并时有 187 文档 / checksum 两个冲突：`docs/187_*` 取 visibility 版（多主机仅网页告警、不删 Key 不停策略），`tray/BigQMT_native_tray_checksums.sha256` 取本机构建重生成的值即可。
+
 若 merge 冲突，停下来不猜；把冲突文件名和 `git diff --check` 输出报告给 105/125，不要自己乱解。
 
 ### 1.5 处理工作区行尾噪音（仅当 `git status --porcelain` 非空时）
@@ -43,6 +45,16 @@ git diff --ignore-cr-at-eol config/strategy_runtime_policy.json
 - 输出非空 → 停止，贴输出，不要 `git checkout` / `stash` / 推
 
 ### 2. 无头验证（先确认 Python 链路通，再动 GUI）
+
+先安装托盘声明的 Python 依赖（重点 `pywin32`，缺失会导致授权 Key 报 `CREDENTIAL_STORE_UNAVAILABLE`）：
+
+```powershell
+py -3.12 -m pip install -r requirements-tray.txt
+py -3.12 -c "import win32cred"
+# 期望无输出、退出码 0；有 ImportError 则先解决依赖再继续
+```
+
+然后跑被测集与无头 verifier：
 
 ```powershell
 py -3.12 -m pytest tests/test_strategy_deployment.py tests/test_strategy_catalog_page.py tests/test_uninstall_strategy_package.py tests/test_set_strategy_auto_run.py tests/test_strategy_deployment_poll.py -q

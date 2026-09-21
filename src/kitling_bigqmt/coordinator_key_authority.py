@@ -17,6 +17,21 @@ SIMULATION = "SIMULATION"
 PRODUCTION = "PRODUCTION"
 
 
+def _deployment_account_ids() -> dict[str, str]:
+    """Real per-host accounts come from gitignored machine.local.json, never
+    from the public repository.  Empty strings mean 'no local override'."""
+    try:
+        from . import machine_config
+
+        machine = machine_config.load_machine_local(machine_config.project_root())
+        return {
+            "simulation": str(machine_config.machine_environment(machine, "simulation").get("account_id") or "").strip(),
+            "production_readonly": str(machine_config.machine_environment(machine, "production_readonly").get("account_id") or "").strip(),
+        }
+    except Exception:
+        return {}
+
+
 @dataclass(frozen=True)
 class KeyObservation:
     account_id: str
@@ -40,9 +55,10 @@ class AccountAuthority:
 
 
 def expected_environment(account_id: str) -> str:
-    if account_id == SIMULATION_ACCOUNT:
+    deploy = _deployment_account_ids()
+    if account_id in {SIMULATION_ACCOUNT, deploy.get("simulation", "")}:
         return SIMULATION
-    if account_id == PRODUCTION_ACCOUNT:
+    if account_id in {PRODUCTION_ACCOUNT, deploy.get("production_readonly", "")}:
         return PRODUCTION
     raise ValueError("unknown account")
 

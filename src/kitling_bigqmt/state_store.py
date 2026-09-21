@@ -513,6 +513,25 @@ class RuntimeStateStore:
             if existing:
                 if str(existing[1]) != payload_hash:
                     raise IdempotencyConflict("strategy execution signal_id was previously used with different payload")
+                # A local pre-broker gate can reject an attempt after the
+                # durable claim.  It is safe to retry only when the recorded
+                # evidence explicitly proves that no broker RPC was made;
+                # broker-side rejections and unknown responses remain one-way.
+                if str(existing[0]) == "REJECTED":
+                    try:
+                        previous_response = json.loads(str(existing[4])) if existing[4] else {}
+                    except json.JSONDecodeError:
+                        previous_response = {}
+                    if isinstance(previous_response, dict) and previous_response.get("broker_call_made") is False:
+                        db.execute(
+                            "UPDATE strategy_execution_attempts SET state=?, response_json=?, updated_at=? WHERE signal_id=?",
+                            ("SUBMITTING", None, now, str(payload["signal_id"])),
+                        )
+                        self._append_jsonl({"event_type": "strategy_execution_retry_claim", "event_time": now,
+                                            "attempt": payload, "reason": "prior_rejection_before_broker_rpc"})
+                        return {"result": "CLAIMED", "signal_id": str(payload["signal_id"]),
+                                "state": "SUBMITTING", "created_at": str(existing[2]), "updated_at": now,
+                                "retry": True}
                 return {
                     "result": "DUPLICATE", "signal_id": str(payload["signal_id"]), "state": str(existing[0]),
                     "created_at": str(existing[2]), "updated_at": str(existing[3]),
