@@ -68,7 +68,17 @@ def build_sample(profile: str, config: dict[str, Any], ping_timeout: float) -> d
         # A stale snapshot is a scheduling symptom, not a liveness failure: the
         # live ping above is the authority on whether the bridge is running.
         "snapshot_fresh": "PASS" if freshness.get("fresh") else str(freshness.get("status", "DEGRADED")),
-        "order_lock": "PASS" if lock["orders_enabled"] is False else "FAIL",
+        # A simulation run may intentionally keep the local execution switch
+        # enabled for unattended operation.  It is valid when the persistent
+        # mode is explicit; formal profiles must remain locked.
+        "order_lock": (
+            "PASS" if (
+                (profile == "simulation" and lock["mode"] == "SIMULATION_STRATEGY_EXECUTION_ENABLED"
+                 and lock["orders_enabled"] and lock["execution_consumer_enabled"])
+                or (profile != "simulation" and lock["orders_enabled"] is False)
+                or lock["mode"] == "READ_ONLY_LOCKED"
+            ) else "FAIL"
+        ),
     }
     if checks["bridge_ping"] != "PASS":
         status = "BLOCKED"
@@ -100,9 +110,9 @@ def build_sample(profile: str, config: dict[str, Any], ping_timeout: float) -> d
         "bridge_ping": ping,
         "snapshot": freshness,
         "order_lock": lock,
-        "read_only": True,
+        "read_only": not (profile == "simulation" and lock["orders_enabled"]),
         "broker_call_made": False,
-        "orders_enabled": False,
+        "orders_enabled": bool(lock["orders_enabled"]),
     }
 
 
@@ -118,8 +128,8 @@ def write_sample(profile: str, sample: dict[str, Any]) -> Path:
         "account_id": sample.get("account_id"),
         "bridge_strategy": "BIGQMT_BRIDGE",
         "trading_date": trading_date,
-        "read_only": True,
-        "orders_enabled": False,
+        "read_only": bool(sample.get("read_only", True)),
+        "orders_enabled": bool(sample.get("orders_enabled", False)),
         "broker_call_made": False,
         "samples": [],
     }
@@ -164,7 +174,7 @@ def main() -> int:
         "checks": sample["checks"],
         "evidence": str(path),
         "broker_call_made": False,
-        "orders_enabled": False,
+        "orders_enabled": bool(sample.get("orders_enabled", False)),
     }, ensure_ascii=False, indent=2))
     return 0 if sample["status"] == "PASSED" else 2
 
