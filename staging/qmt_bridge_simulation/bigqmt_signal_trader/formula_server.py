@@ -535,6 +535,11 @@ def _market_data_params(params):
     # 数据明明在本地却读到 0 行（issue #66）。拒绝路由，让 RPC 桥回答。
     if period == "tick" or period.startswith("l2"):
         raise ValueError("period=%s is not served by FormulaServer" % period)
+    # synth_fallback_only（#237）是桥端的诊断开关：FormulaServer 没有这个概念，
+    # 照常回答就会让「回落路径通了」看起来成立，而回落根本没跑。拒绝路由。
+    if str(params.get("synth_fallback_only") or "").strip().lower() not in (
+            "", "0", "false", "no", "none"):
+        raise ValueError("synth_fallback_only is served by the RPC bridge only")
     count = params.get("count", -1)
     try:
         count = int(count)
@@ -605,6 +610,11 @@ METHOD_MAP = {
     "get_weight_in_index": ("getWeightInIndex", _weight_in_index_params, _scalar_result),
     "get_stock_list_in_sector": ("getStockListInSector", _sector_params, _list_result),
     "get_market_data_ex": ("getMarketData", _market_data_params, _market_data_result),
+    # Same bars, different contract: get_market_data documents
+    # dict[field]->wide-frame, which the client pivots after this answers.
+    # Routing it here takes a 500+-code read off the QMT strategy thread
+    # (repeated RPC timeouts, 2026-09-10 report).
+    "get_market_data": ("getMarketData", _market_data_params, _market_data_result),
 }
 
 SUPPORTED_METHODS = tuple(sorted(METHOD_MAP))

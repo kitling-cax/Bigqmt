@@ -147,10 +147,8 @@ def build_app(context_info=None, config=None):
             price_type=int(config.get("order_price_type", 11)),
             quick_trade=int(config.get("quick_trade", 2)),
         )
-        # The QMT bridge has a broker-capable gateway so the code does not
-        # change at approval time.  It is wrapped immediately: missing local
-        # policy, a non-simulation environment, or any failed P06 gate denies
-        # all submits/cancels before passorder can run.
+        # Upstream stays broker-capable; the local wrapper makes every write
+        # account-bound, locally authorized and strategy-attributed.
         order_gateway = GuardedOrderGateway(
             order_gateway,
             OrderAdmissionPolicy(config.get("execution_admission"), account_id),
