@@ -25,6 +25,7 @@ never reaches argv or a file on disk, and this tool keeps that arrangement.
 import getpass
 import os
 import subprocess
+import tempfile
 import sys
 
 
@@ -95,6 +96,30 @@ def _zmq_server_bind_host(client_host):
     return "0.0.0.0"
 
 
+def _background_threads_for(transport):
+    """Which rpc_background_threads value this transport wants: False, all of them.
+
+    Not a safety choice -- trade-context methods are excluded from listener
+    processing no matter what this says (#244) -- purely latency. The adjust
+    drain costs at most one tick; a background thread costs one tick per
+    GIL acquisition, and a round trip has several. Measured on the live
+    terminal 2026-09-22 (0.3.50, 100ms tick, min/median/max ms, #343):
+
+        method                  redis+bg      zmq+bg        zmq+drain    redis+drain
+        ping                    199/407/605   98/103/303    10/87/108    23/102/106
+        get_full_tick           199/338/473   8/196/306     8/90/107     26/102/107
+        query_stock_positions   102/197/320   396/490/600   8/88/103     85/103/109
+        query_stock_orders      33/175/200    399/493/613   4/88/105     86/102/109
+
+    redis used to be the exception ("brpop wakes immediately", 3.4ms in the
+    0.3.28 table) -- but that table was measured right after restarting the
+    strategy, inside QMT's history replay, when adjust runs ~5000 times a
+    second and every hop is sub-millisecond. At the steady 10Hz that follows
+    the replay, redis+background is the slowest of the four (#351).
+    """
+    return False
+
+
 def render_server_config(answers):
     """bigqmt_signal_trader_local_config.py -- read by the QMT-side strategy."""
     lines = [
@@ -131,12 +156,14 @@ def render_server_config(answers):
         lines.append("    # Remote order/cancel stays off until you explicitly want it.")
     lines.extend([
         '    "rpc_allow_order_methods": %r,' % bool(answers["allow_order_methods"]),
-        "    # Requests drain through QMT's run_time(\"adjust\", ...) callback, on the",
-        "    # main strategy thread. get_trade_detail_data returns EMPTY off that",
-        "    # thread, so order/query methods must not move to a background thread.",
+        "    # get_trade_detail_data returns EMPTY off the main strategy thread, so",
+        "    # order/query methods always run on QMT's adjust callback -- enforced",
+        "    # in code, not by the flag below (#244). rpc_background_threads is a",
+        "    # latency choice: False (adjust drain) for every transport -- a",
+        "    # background thread pays ~1 adjust tick per GIL acquisition (#343).",
         '    "rpc_process_in_listener": True,',
         '    "rpc_listener_methods": ("*",),',
-        '    "rpc_background_threads": False,',
+        '    "rpc_background_threads": %r,' % _background_threads_for(answers["transport"]),
         '    "schedule_adjust": True,',
         '    "schedule_adjust_interval": "100nMilliSecond",',
         '    "full_tick_cache_enabled": False,',
@@ -262,7 +289,7 @@ def render_single_file_config_block(answers):
         '    "rpc_allow_order_methods": %r,' % bool(answers["allow_order_methods"]),
         '    "rpc_process_in_listener": True,',
         '    "rpc_listener_methods": ("*",),',
-        '    "rpc_background_threads": False,',
+        '    "rpc_background_threads": %r,' % _background_threads_for(answers["transport"]),
         '    "schedule_adjust": True,',
         '    "schedule_adjust_interval": "100nMilliSecond",',
         '    "full_tick_cache_enabled": False,',
@@ -430,15 +457,62 @@ def _write(path, text, encoding="utf-8"):
         pass
 
 
+def _materialize_packaged_builder(script):
+    """Unpack the wheel-shipped copy of tools/<script> to a temp dir.
+
+    The single-file builders live in tools/ in a source checkout, which a pip
+    install does not ship; the wheel carries byte-identical copies as package
+    data (bigqmt_signal_trader/_singlefile/*.txt) so bigqmt-init's single-file
+    options work from a plain ``pip install`` too. Returns the materialized
+    path, or None when the packaged copy is absent.
+    """
+    try:
+        import pkgutil
+        data = pkgutil.get_data(
+            "bigqmt_signal_trader", "_singlefile/%s.txt" % script)
+    except Exception:
+        data = None
+    if not data:
+        return None
+    tmpdir = tempfile.mkdtemp(prefix="bigqmt-builder-")
+    # The flat builder imports its redis sibling; unpack both so the sibling
+    # import resolves no matter which one was asked for.
+    for name in {script, BUILDERS["single_file"][0]}:
+        payload = pkgutil.get_data(
+            "bigqmt_signal_trader", "_singlefile/%s.txt" % name)
+        if payload:
+            with open(os.path.join(tmpdir, name), "wb") as handle:
+                handle.write(payload)
+    return os.path.join(tmpdir, script)
+
+
 def build_single_file(repo_root, deployment, answers, out_path=None):
     """Run the matching builder and bake the answers into its config block."""
     script, default_name, encoding = BUILDERS[deployment]
     builder = os.path.join(repo_root, "tools", script)
     if not os.path.exists(builder):
+        builder = _materialize_packaged_builder(script)
+    if builder is None:
         raise ValueError(
-            "builder not found: %s (run this from a source checkout)" % builder)
+            "builder %s not found: it is neither at %s nor inside the installed "
+            "package (bigqmt_signal_trader/_singlefile). Upgrade "
+            "xtquant-big-convert, or pass --repo-root pointing at a source "
+            "checkout." % (script, os.path.join(repo_root, "tools", script)))
     target = out_path or os.path.join(os.getcwd(), default_name)
     env = dict(os.environ, BIGQMT_BUILD_OUT=target)
+    try:
+        import bigqmt_signal_trader as _pkg
+        package_parent = os.path.dirname(os.path.dirname(os.path.abspath(_pkg.__file__)))
+    except Exception:
+        package_parent = ""
+    if package_parent:
+        # The builder subprocess resolves the embedded sources by importing
+        # bigqmt_signal_trader; make sure it finds THIS installation's copy
+        # (pip layout, site-packages on the interpreter but not for a bare
+        # subprocess in some test setups).
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (package_parent, os.environ.get("PYTHONPATH", ""))
+            if part)
     completed = subprocess.run(
         [sys.executable, builder], env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
