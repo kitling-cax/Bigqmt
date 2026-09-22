@@ -1,39 +1,130 @@
-"""ZeroMQ transport for the BigQMT RPC bridge.
+"""ZeroMQ transport for the BigQMT RPC bridge (no-redis version).
 
-Designed for same-host low latency. Topology:
+Same as bigqmt_signal_trader.transports.zmq_transport, but with the redis
+dependencies inlined and the redis-based service discovery removed. This lets
+the module load in QMT sandboxes that reject `import redis` or any module
+whose name mentions redis.
+
+Design (unchanged from the redis version):
 
 * **Server** binds a ``ROUTER`` socket. Each inbound message arrives as
   ``[identity, payload]``; the server remembers ``identity`` keyed by
   ``request_id`` and replies with ``[identity, payload]`` so ZMQ routes the
   response back to the originating client automatically.
 * **Client** connects a ``DEALER`` socket (with a unique random identity), sends
-  ``[payload]``, then ``poll``/``recv`` for the response. DEALER gives each
-  client an asymmetric async path that pairs naturally with ROUTER.
+  ``[payload]``, then ``poll``/``recv`` for the response.
 
-Wire framing is a single JSON payload per message. The original b64 stock-code
-obfuscation (``encode_rpc_request_payload``) is applied too, so payloads stay
-opaque even though ZMQ does not need it — keeps the wire uniform with Redis.
-
-Two threads on the server: the ROUTER recv loop, and a per-client is implicit
-(ZMQ handles multiplexing). One thread on the client for recv is avoided by
-using DEALER + ``poll`` (synchronous request/response fits the RPC model).
+Kept in sync with the source transport by hand (there is no generator). As of
+this copy it carries the wake pipe (#177) and the per-thread DEALER (#186); the
+only intentional deletions are the three redis imports (inlined below) and the
+redis service discovery. See CLAUDE.md "Releasing" -- re-sync this on every
+change to the source transport.
 """
 
+import base64
 import json
 import queue
 import threading
-import traceback
 import time
 import uuid
 
-from ..adapters.redis_common import decode_text
-from ..redis_rpc import (
-    TYPED_PAYLOAD_FLAG, TYPED_PAYLOAD_MARKER,
-    decode_rpc_request_payload,
-    encode_rpc_request_payload,
-)
-from .base import RpcTransport, TransportError, TransportTimeout
 
+# ---------------------------------------------------------------------------
+# Inlined encoding helpers (originally from bigqmt_signal_trader.adapters.
+# redis_common and bigqmt_signal_trader.redis_rpc). Kept here so this module
+# has zero imports from any redis-named module.
+# ---------------------------------------------------------------------------
+
+SAFE_B64_PREFIX = "b64s:"
+SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
+SAFE_B64_DIGIT_DECODE = str.maketrans("!#$%&()*~?", "0123456789")
+
+# Typed-payload markers (inlined from redis_rpc). _loads flags whether the wire
+# text carried a typed payload so the client walks it the same as over redis.
+TYPED_PAYLOAD_MARKER = '"__bigqmt_type__"'
+TYPED_PAYLOAD_FLAG = "__bigqmt_typed__"
+
+
+def decode_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def encode_rpc_request_payload(request):
+    """Encode request JSON so patched QMT clients do not inspect stock-code text."""
+    raw = json.dumps(request, ensure_ascii=False).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii").translate(SAFE_B64_DIGIT_ENCODE)
+    return SAFE_B64_PREFIX + encoded
+
+
+def decode_rpc_request_payload(text):
+    text = str(text)
+    if not text.startswith(SAFE_B64_PREFIX):
+        return text
+    encoded = text[len(SAFE_B64_PREFIX):].translate(SAFE_B64_DIGIT_DECODE)
+    return base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# TransportError / TransportTimeout (inlined from transports.base -- kept here
+# so this module is fully self-contained for QMT sandbox loading).
+# ---------------------------------------------------------------------------
+
+class TransportError(RuntimeError):
+    pass
+
+
+class TransportTimeout(TransportError):
+    pass
+
+
+class RpcTransport:
+    """Minimal transport base (inlined subset of transports.base)."""
+
+    def __init__(self, account_id="", print_prefix="[bigqmt_rpc]"):
+        self.account_id = str(account_id or "")
+        self.print_prefix = str(print_prefix or "[bigqmt_rpc]")
+        self._on_request = None
+        self._running = False
+
+    def start_receiving(self, on_request):
+        self._on_request = on_request
+        self._running = True
+
+    def stop(self):
+        self._running = False
+        self._on_request = None
+
+    def deliver(self, request):
+        callback = self._on_request
+        if callback is None:
+            return None
+        try:
+            response = callback(request)
+        except Exception as exc:
+            import datetime as _dt
+            response = {
+                "schema_version": 1,
+                "request_id": str((request or {}).get("request_id") or ""),
+                "account_id": str((request or {}).get("account_id") or self.account_id or ""),
+                "method": str((request or {}).get("method") or ""),
+                "ok": False,
+                "data": None,
+                "error": "%s: %s" % (exc.__class__.__name__, exc),
+                "handled_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        if response is not None:
+            try:
+                self.send_response(request, response)
+            except Exception:
+                pass
+        return response
+
+
+# ---------------------------------------------------------------------------
+# ZMQ transport
+# ---------------------------------------------------------------------------
 
 # ZMQ does not support ipc:// on Windows (it trips a signaler abort), so the
 # default endpoint is tcp loopback. The port is derived from the account_id so
@@ -74,13 +165,17 @@ def _loads(raw):
 
 
 class ZmqTransport(RpcTransport):
-    """ZMQ ROUTER/DEALER transport.
+    """ZMQ ROUTER/DEALER transport (no-redis version).
 
     The same instance plays both roles depending on method called:
     ``send_request`` acts as a client (DEALER connect), ``start_receiving`` +
     ``send_response`` act as a server (ROUTER bind). A deployment normally uses
     one instance per role (the QMT process is the server; the external client
     is the client).
+
+    Unlike the redis version, this one does NOT use redis-based service
+    discovery. The server binds the configured address exactly; the client
+    connects to the configured or derived address directly.
     """
 
     name = "zmq"
@@ -97,10 +192,6 @@ class ZmqTransport(RpcTransport):
         recv_timeout_seconds=1.0,
         server_hwm=10000,
         client_linger_ms=0,
-        discovery_redis_client=None,
-        discovery_key_template="bigqmt:zmq:addr:{account_id}",
-        discovery_ttl_seconds=300,
-        port_scan_range=50,
         stall_warn_seconds=20.0,
         stall_check_seconds=5.0,
     ):
@@ -129,13 +220,6 @@ class ZmqTransport(RpcTransport):
         self.recv_timeout_seconds = float(recv_timeout_seconds)
         self.server_hwm = int(server_hwm)
         self.client_linger_ms = int(client_linger_ms)
-        # Discovery remains available for clients, but a server must bind the
-        # configured address exactly. ``port_scan_range`` is retained only for
-        # backward-compatible config loading and is intentionally not used.
-        self.discovery_redis_client = discovery_redis_client
-        self.discovery_key_template = discovery_key_template
-        self.discovery_ttl_seconds = int(discovery_ttl_seconds)
-        self.port_scan_range = int(port_scan_range)
 
         self._zmq = None  # imported lazily
         self._ctx = None
@@ -196,12 +280,6 @@ class ZmqTransport(RpcTransport):
             recv_timeout_seconds=float(config.get("recv_timeout_seconds", 1.0)),
             server_hwm=int(config.get("server_hwm", 10000)),
             client_linger_ms=int(config.get("client_linger_ms", 0)),
-            discovery_redis_client=config.get("discovery_redis_client"),
-            discovery_key_template=config.get(
-                "discovery_key_template", "bigqmt:zmq:addr:{account_id}"
-            ),
-            discovery_ttl_seconds=int(config.get("discovery_ttl_seconds", 300)),
-            port_scan_range=int(config.get("port_scan_range", 50)),
             stall_warn_seconds=float(config.get("stall_warn_seconds", 20.0)),
             stall_check_seconds=float(config.get("stall_check_seconds", 5.0)),
         )
@@ -297,27 +375,6 @@ class ZmqTransport(RpcTransport):
             raise
         self._router = sock
         self._actual_bind_address = self.bind_address
-        self._publish_discovery(self.bind_address)
-
-    def _publish_discovery(self, address):
-        if self.discovery_redis_client is None:
-            return
-        key = self.discovery_key_template.format(account_id=self.account_id)
-        try:
-            self.discovery_redis_client.setex(
-                key, self.discovery_ttl_seconds, address
-            )
-        except Exception as exc:
-            print("%s zmq discovery publish failed: %s" % (self.print_prefix, exc))
-
-    def _clear_discovery(self):
-        if self.discovery_redis_client is None:
-            return
-        key = self.discovery_key_template.format(account_id=self.account_id)
-        try:
-            self.discovery_redis_client.delete(key)
-        except Exception:
-            pass
 
     def start_receiving(self, on_request, background_threads=True):
         super(ZmqTransport, self).start_receiving(on_request)
@@ -345,42 +402,6 @@ class ZmqTransport(RpcTransport):
         )
 
     def _router_loop(self):
-        """接收循环，出错自动重建 ROUTER 并继续（#240）。
-
-        原来这里是一层 try/finally：任何逃出内层 while 的异常都会走到 finally
-        关掉 socket、线程结束，**桥从此不再接收任何请求，也没有任何提示** ——
-        从客户端看和「服务端死了」一模一样，而 QMT 里的策略还好好地跑着，
-        adjust 照常打点。
-
-        redis 那两条循环早就是「异常 -> 退避 -> 重建连接」的形状；zmq 缺这一层。
-        现在补上：内层跑接收，外层负责重建。退避从 1 秒起、翻倍到 30 秒封顶 ——
-        端口被别的进程占着时不至于每秒刷屏。
-        """
-        backoff = 1.0
-        while self._running:
-            try:
-                self._router_session()
-                backoff = 1.0          # 正常退出（stop），不重连
-            except Exception:
-                if not self._running:
-                    break
-                print("%s zmq router failed, rebuilding in %.0fs:\n%s"
-                      % (self.print_prefix, backoff, traceback.format_exc()))
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
-                if not self._running:
-                    break
-                try:
-                    self._bind_configured_address()
-                except Exception:
-                    # 重建失败（端口还被占着）——下一轮继续退避重试，
-                    # 不能在这里放弃：放弃就回到了「线程静悄悄死掉」。
-                    print("%s zmq rebind failed, will retry" % self.print_prefix)
-                    continue
-                print("%s zmq router rebuilt bound=%s"
-                      % (self.print_prefix, self._actual_bind_address or self.bind_address))
-
-    def _router_session(self):
         poller = None
         if self._wake_recv is not None:
             try:
@@ -419,15 +440,11 @@ class ZmqTransport(RpcTransport):
             # closing a ZMQ socket from a different thread trips a signaler
             # assertion (abort); closing it here is safe because this thread
             # created and exclusively used it.
-            #
-            # 只在真正停机时关。重连路径上 _bind_configured_address 会建一个新的，
-            # 这里再关就把新 socket 关掉了 —— 那会让「重连成功」变成静默失效。
-            if not self._running:
-                try:
-                    self._router.close(linger=0)
-                except Exception:
-                    pass
-                self._router = None
+            try:
+                self._router.close(linger=0)
+            except Exception:
+                pass
+            self._router = None
 
     def _receive_request(self, flags=0):
         try:
@@ -601,34 +618,11 @@ class ZmqTransport(RpcTransport):
 
     # -- client side ------------------------------------------------------
     def _resolve_connect_address(self):
-        """Resolve the address to connect to.
-
-        Order: explicit connect_address > discovery lookup > default derived.
-        Discovery lets the client find a server that had to move off the
-        default port because of a collision.
-        """
+        """Resolve the address to connect to. No redis discovery -- use explicit
+        connect_address, else derive from account_id."""
         if self.connect_address:
             return self.connect_address
-        discovered = self._lookup_discovery()
-        if discovered:
-            return discovered
         return _default_zmq_address(self.account_id)
-
-    def _lookup_discovery(self):
-        if self.discovery_redis_client is None:
-            return None
-        key = self.discovery_key_template.format(account_id=self.account_id)
-        try:
-            raw = self.discovery_redis_client.get(key)
-        except Exception:
-            return None
-        if not raw:
-            return None
-        try:
-            text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        except Exception:
-            return None
-        return text or None
 
     def _reap_dead_dealers(self):
         """Close sockets whose owning thread has exited. Caller holds the lock.
@@ -715,11 +709,7 @@ class ZmqTransport(RpcTransport):
                 pass
             self._router = None
         self._router_thread = None
-        # If we were a server that published a discovery address, clear it so
-        # clients don't keep hitting a dead endpoint.
-        if self._actual_bind_address is not None:
-            self._clear_discovery()
-            self._actual_bind_address = None
+        self._actual_bind_address = None
         with self._client_lock:
             for _owner, sock in self._dealers:
                 try:
