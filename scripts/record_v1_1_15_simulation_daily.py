@@ -47,7 +47,18 @@ def main() -> int:
     trades_reply = client.trades()
     asset_reply = client.account_asset()
     ping_reply = client.ping()
-    positions = dict(positions_reply.get("data") or {})
+    positions_data = positions_reply.get("data") or []
+    if isinstance(positions_data, dict):
+        # 0.3.26 bridge shape: dict keyed by stock_code
+        positions = positions_data
+    elif isinstance(positions_data, list):
+        # 0.3.54+ bridge shape: list of position dicts, each with stock_code
+        positions = {
+            item["stock_code"]: item for item in positions_data
+            if isinstance(item, dict) and item.get("stock_code")
+        }
+    else:
+        positions = {}
     owned_quantities = accounting.position_quantities(STRATEGY_ID)
     ticks = client.full_tick(sorted(owned_quantities)) if owned_quantities else {"data": {}}
     prices = {

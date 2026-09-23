@@ -137,7 +137,16 @@ def main() -> int:
         calendar_reply = client.trading_dates("SH", "20260101", now.strftime("%Y%m%d"), -1)
         trading_days = list(calendar_reply.get("data") or [])
         baseline = json.loads((ROOT / "runtime_data" / "baselines" / ("simulation_%s_external_positions.json" % account_id)).read_text(encoding="utf-8"))
-        broker_positions = dict(positions_reply.get("data") or {})
+        positions_data = positions_reply.get("data") or []
+        if isinstance(positions_data, dict):
+            broker_positions = positions_data
+        elif isinstance(positions_data, list):
+            broker_positions = {
+                item["stock_code"]: item for item in positions_data
+                if isinstance(item, dict) and item.get("stock_code")
+            }
+        else:
+            broker_positions = {}
         broker_quantities = {code: int((row or {}).get("volume") or 0) for code, row in broker_positions.items()}
         reconciliation = reconcile_daily_positions(broker_quantities, dict(baseline.get("positions") or {}), owned)
         broker_orders = list(orders_reply.get("data") or [])
