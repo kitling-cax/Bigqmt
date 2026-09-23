@@ -67,6 +67,17 @@ ACCOUNT_ALIASES = _load_account_aliases()
 REQUIRED_EXECUTOR_SERVICES = ("qmt", "redis", "bridge", "tray")
 
 
+def account_alias_status() -> dict:
+    """Return an operator-safe configuration check without deployment IDs."""
+    profile_keys = sorted({value for value in ACCOUNT_ALIASES.values()
+                           if value in ACCOUNT_POLICY})
+    return {
+        "configured": bool(ACCOUNT_ALIASES),
+        "configured_alias_count": len(ACCOUNT_ALIASES),
+        "profile_keys": profile_keys,
+    }
+
+
 def _strategy_visibility_snapshot() -> dict:
     """Flatten sanitized strategy observations and derive web-only alerts.
 
@@ -431,7 +442,12 @@ async function refresh(){try{const [h,e,i,a]=await Promise.all([fetch('/api/v1/h
 
 def response_payload(path: str) -> tuple[int, dict]:
     if path == "/healthz":
-        return 200, {"status": "ok", "service": "kitling-bigqmt-coordinator", "mode": COORDINATOR_MODE.lower()}
+        return 200, {
+            "status": "ok",
+            "service": "kitling-bigqmt-coordinator",
+            "mode": COORDINATOR_MODE.lower(),
+            "account_alias_configuration": account_alias_status(),
+        }
     if path == "/readyz":
         return 200, {"status": "ready", "mode": COORDINATOR_MODE.lower(), "database": "not-enabled-in-bootstrap"}
     if path == "/api/v1/instance":

@@ -46,6 +46,22 @@ def test_coordinator_root_is_readonly_dashboard():
         server.shutdown()
 
 
+def test_healthz_reports_only_sanitized_alias_configuration(monkeypatch):
+    monkeypatch.setattr(serve, "ACCOUNT_ALIASES", {
+        "deployment-account-one": "90000001",
+        "deployment-account-two": "90000002",
+    })
+    code, payload = serve.response_payload("/healthz")
+    assert code == 200
+    status = payload["account_alias_configuration"]
+    assert status == {
+        "configured": True,
+        "configured_alias_count": 2,
+        "profile_keys": ["90000001", "90000002"],
+    }
+    assert "deployment-account-one" not in json.dumps(payload)
+
+
 def test_executor_preview_is_readonly_and_filters_formal_account():
     HOSTS.clear()
     HOSTS["host-105"] = {
