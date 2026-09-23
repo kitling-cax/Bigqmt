@@ -44,15 +44,26 @@ ACCOUNT_POLICY = {
     "90000001": {"mode": "SIMULATION", "execution_eligible": True},
     "90000002": {"mode": "PRODUCTION_READ_ONLY", "execution_eligible": False},
 }
-# Real account aliases are private deployment configuration.  The public
-# repository only carries synthetic defaults; production deployments should
-# set BIGQMT_ACCOUNT_ALIASES to a JSON object in the service environment.
-try:
-    ACCOUNT_ALIASES = json.loads(os.environ.get("BIGQMT_ACCOUNT_ALIASES", "{}"))
-    if not isinstance(ACCOUNT_ALIASES, dict):
-        ACCOUNT_ALIASES = {}
-except json.JSONDecodeError:
-    ACCOUNT_ALIASES = {}
+# Deployment (real) account IDs -> stable internal profile keys are supplied
+# by the Coordinator operator through gitignored config/machine.local.json
+# (section coordinator.deployment_account_aliases), never hardcoded here.
+# Real account IDs must not live in the public source tree.  Absent mapping on
+# a deployment degrades to the identity mapping, so the operator must provide
+# the alias table on the Coordinator for its account-policy checks to apply.
+def _load_account_aliases() -> dict[str, str]:
+    try:
+        from kitling_bigqmt.machine_config import load_machine_local
+
+        machine = load_machine_local(ROOT)
+        aliases = (machine.get("coordinator") or {}).get("deployment_account_aliases") or {}
+        if isinstance(aliases, dict):
+            return {str(k): str(v) for k, v in aliases.items() if str(k).strip() and str(v).strip()}
+    except Exception:
+        pass
+    return {}
+
+
+ACCOUNT_ALIASES = _load_account_aliases()
 REQUIRED_EXECUTOR_SERVICES = ("qmt", "redis", "bridge", "tray")
 
 
