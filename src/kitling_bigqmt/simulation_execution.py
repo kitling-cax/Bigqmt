@@ -14,6 +14,8 @@ class SimulationExecutionBlocked(ValueError):
 
 
 STRATEGY_ID = "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15"
+# Public fallback used only by deterministic fixtures. Live entry points must
+# replace it with the account from machine.local.json before any QMT call.
 ACCOUNT_ID = "90000001"
 LOT_SIZE = 100
 TARGET_CASH_RATIO = 0.98
@@ -51,12 +53,16 @@ def build_order_plan(
     trade_day: str,
     sleeve_summary: dict[str, Any],
     ticks: dict[str, dict[str, Any]],
+    account_id: str = ACCOUNT_ID,
 ) -> dict[str, Any] | None:
     """Return one sell-before-buy order, or ``None`` when already aligned.
 
     Existing broker holdings do not enter this calculation: only positions
     recorded in the v1.1.15 sleeve are eligible to sell.
     """
+    resolved_account_id = str(account_id or "").strip()
+    if not resolved_account_id:
+        raise SimulationExecutionBlocked("simulation account_id is required")
     signal_day = str(signal_event.get("signal_day") or "")
     if not signal_day or signal_day < str(activation_signal_not_before):
         raise SimulationExecutionBlocked("signal predates direct-simulation activation")
@@ -81,7 +87,7 @@ def build_order_plan(
         code = str(current["stock_code"])
         raw_price = _best_price(dict(ticks.get(code) or {}), "SELL")
         return {
-            "strategy_id": STRATEGY_ID, "account_id": ACCOUNT_ID,
+            "strategy_id": STRATEGY_ID, "account_id": resolved_account_id,
             "signal_day": signal_day, "stock_code": code, "side": "SELL",
             "quantity": int(current["quantity"]),
             "quote_price": raw_price,
@@ -105,7 +111,7 @@ def build_order_plan(
     if quantity * limit_price + fee > cash:
         raise SimulationExecutionBlocked("buy would exceed strategy sleeve cash")
     return {
-        "strategy_id": STRATEGY_ID, "account_id": ACCOUNT_ID,
+        "strategy_id": STRATEGY_ID, "account_id": resolved_account_id,
         "signal_day": signal_day, "stock_code": code, "side": "BUY",
         "quantity": quantity, "quote_price": quote_price, "limit_price": limit_price,
         "estimated_fee": fee,

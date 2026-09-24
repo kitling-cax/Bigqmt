@@ -1,5 +1,7 @@
 # `.125` VS Code + Claude 执行清单：Host Agent 0.1.0 Shadow
 
+> **历史文档，已废弃。** 文档中的 `192.0.2.*`、`198.51.100.*` 是测试占位地址，不能用于真实部署。请改用 `docs/166_claude_host125_bugfix_runbook_2026-09-19.md`；打包和部署脚本现在要求显式传入真实 host_id 与 Shadow endpoint。
+
 目标主机：`192.0.2.125`
 
 执行人：`.125` Windows 侧 VS Code 中的 Claude 插件

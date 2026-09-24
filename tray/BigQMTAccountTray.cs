@@ -6,27 +6,31 @@ using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using System.Web.Script.Serialization;
 
 internal static class BigQMTAccountTray
 {
 #if SIMULATION
     private const string Profile = "simulation";
-    private const string Account = "90000001";
+    private const string DefaultAccount = "90000001";
     private const int RedisPort = 6379;
     private const int DashboardPort = 17890;
     private const string DashboardRoute = "/simulation/overview";
     private const string ProfileTitle = "BigQMT 模拟盘";
 #else
     private const string Profile = "production_readonly";
-    private const string Account = "90000002";
+    private const string DefaultAccount = "90000002";
     private const int RedisPort = 6380;
     private const int DashboardPort = 17891;
     private const string DashboardRoute = "/production-readonly/overview";
     private const string ProfileTitle = "BigQMT 正式只读";
 #endif
+    private const string StrategyIdV1115 = "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15";
+    private static string Account;
 
     private static NotifyIcon tray;
     private static ToolStripMenuItem statusItem;
@@ -37,8 +41,14 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem dashboardItem;
     private static ToolStripMenuItem coordinatorItem;
     private static ToolStripMenuItem intentItem;
+    private static ToolStripMenuItem hostAgentItem;
+    private static ToolStripMenuItem strategyDeploymentItem;
+    private static ToolStripMenuItem strategyRuntimeItem;
+    private static ToolStripMenuItem currentStrategyItem;
+    private static ToolStripMenuItem authorizationKeyItem;
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
+    private static ToolStripMenuItem strategyPolicyMenu;
     private static MutexHandle mutex;
     private static Icon trayIcon;
     private static string bridgeState = "未探测（只读）";
@@ -50,11 +60,16 @@ internal static class BigQMTAccountTray
     private static DateTime nextAutoDashboardAttempt = DateTime.MinValue;
     private static string lastCoordinatorHeartbeatState = "";
     private static string lastCoordinatorIntentState = "";
+    private static string hostAgentState = "未初始化";
+    private static string hostAgentDetail = "等待首次心跳";
+    private static string configuredHostId = "";
+    private static string configuredCoordinatorEndpoint = "";
+    private static string configuredFactSecretPath = "";
 
     // v1.1.15 unattended simulation schedule (simulation profile only).
     // This tray never submits an order itself. It only invokes the fail-closed
-    // Python cycle scripts that arm, submit at most one deterministically
-    // identified order, then immediately re-lock the runtime control.
+    // Python cycle scripts. Local execution remains enabled until the
+    // operator explicitly locks it or removes the authorization Key.
     private static readonly object scheduleLock = new object();
     private static bool schedulerBusy = false;
     private static string lastCloseShadowDate = "";
@@ -90,10 +105,15 @@ internal static class BigQMTAccountTray
     // Facts-only Host Agent delivery is deliberately separate from the
     // simulation order scheduler.  It never changes the account state/icon.
     private static DateTime nextFactDeliveryAttempt = DateTime.MinValue;
+    private static DateTime nextStrategyDeploymentAttempt = DateTime.MinValue;
+    private static string lastStrategyDeploymentState = "";
+    private static string lastAuthorizationKeyState = "";
 
     [STAThread]
     private static void Main()
     {
+        LoadRuntimeNodeConfig();
+        Account = LoadConfiguredAccount();
         mutex = new MutexHandle("Local\\KitlingBigQMTNativeTray-" + Profile);
         if (!mutex.IsFirstInstance) return;
         Application.EnableVisualStyles();
@@ -110,6 +130,11 @@ internal static class BigQMTAccountTray
         dashboardItem = new ToolStripMenuItem("Dashboard：检查中"); dashboardItem.Enabled = false; menu.Items.Add(dashboardItem);
         coordinatorItem = new ToolStripMenuItem("Coordinator：检查中（只读）"); coordinatorItem.Enabled = false; menu.Items.Add(coordinatorItem);
         intentItem = new ToolStripMenuItem("Intents：检查中（只读预览）"); intentItem.Enabled = false; menu.Items.Add(intentItem);
+        hostAgentItem = new ToolStripMenuItem("Host Agent：初始化中（只读）"); hostAgentItem.Enabled = false; menu.Items.Add(hostAgentItem);
+        strategyDeploymentItem = new ToolStripMenuItem("策略部署：未同步（安装不启动）"); strategyDeploymentItem.Enabled = false; menu.Items.Add(strategyDeploymentItem);
+        strategyRuntimeItem = new ToolStripMenuItem("策略运行状况：检查中"); strategyRuntimeItem.Enabled = false; menu.Items.Add(strategyRuntimeItem);
+        currentStrategyItem = new ToolStripMenuItem("当前运行策略：检查中"); currentStrategyItem.Enabled = false; menu.Items.Add(currentStrategyItem);
+        authorizationKeyItem = new ToolStripMenuItem("下单授权 Key：检查中"); authorizationKeyItem.Enabled = false; menu.Items.Add(authorizationKeyItem);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
         services.DropDownItems.Add("启动缺失的 QMT", null, delegate { StartQmt(false); });
@@ -119,7 +144,15 @@ internal static class BigQMTAccountTray
         services.DropDownItems.Add("启动缺失的 Redis", null, delegate { StartRedis(); });
         services.DropDownItems.Add("确保本地看板运行", null, delegate { EnsureDashboard(); });
         services.DropDownItems.Add("立即探测 Bridge（只读）", null, delegate { ProbeBridge(); });
+        services.DropDownItems.Add("立即同步 Host Agent（只读）", null, delegate { HostAgentSyncNow(); });
+        services.DropDownItems.Add("立即拉取策略安装请求（不启动）", null, delegate { StrategyDeploymentIfDue(DateTime.Now, true); });
         menu.Items.Add(services);
+        ToolStripMenuItem keyMenu = new ToolStripMenuItem("下单授权 Key 管理");
+        keyMenu.DropDownItems.Add("查看本账户 Key 状态", null, delegate { ShowAuthorizationKeyStatus(); });
+        keyMenu.DropDownItems.Add("加入本账户授权 Key", null, delegate { InstallAuthorizationKey(); });
+        keyMenu.DropDownItems.Add("设置/修改托盘删除密码", null, delegate { ConfigureDeletePassword(); });
+        keyMenu.DropDownItems.Add("删除本账户授权 Key", null, delegate { DeleteAuthorizationKey(); });
+        menu.Items.Add(keyMenu);
         menu.Items.Add("打开看板", null, delegate { OpenDashboard(); });
         menu.Items.Add("打开本账户日志", null, delegate { OpenLogs(); });
         menu.Items.Add("生成诊断报告", null, delegate { GenerateDiagnosis(); });
@@ -127,10 +160,22 @@ internal static class BigQMTAccountTray
         windowsStartupItem.CheckOnClick = true;
         windowsStartupItem.CheckedChanged += delegate { SetWindowsStartup(windowsStartupItem.Checked); };
         menu.Items.Add(windowsStartupItem);
-        strategyPolicyItem = new ToolStripMenuItem(Profile == "simulation" ? "启用 v1.1.15 模拟策略运行" : "允许已批准正式策略恢复意图");
-        strategyPolicyItem.CheckOnClick = true;
-        strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
-        menu.Items.Add(strategyPolicyItem);
+        if (Profile == "simulation")
+        {
+            // One checkable row per installed strategy, rebuilt when the
+            // installed set changes (see RebuildStrategyPolicyMenu).
+            strategyPolicyMenu = new ToolStripMenuItem("策略运行开关");
+            menu.Items.Add(strategyPolicyMenu);
+        }
+        else
+        {
+            strategyPolicyItem = new ToolStripMenuItem("允许已批准正式策略恢复意图");
+            strategyPolicyItem.CheckOnClick = true;
+            strategyPolicyItem.CheckedChanged += delegate { SetStrategyPolicy(strategyPolicyItem.Checked); };
+            menu.Items.Add(strategyPolicyItem);
+        }
+        if (Profile == "simulation")
+            menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
         menu.Items.Add("刷新全部状态", null, delegate { RefreshStatus(); });
         menu.Items.Add("锁定订单状态", null, delegate { LockReminder(); });
         menu.Items.Add(new ToolStripSeparator());
@@ -154,9 +199,11 @@ internal static class BigQMTAccountTray
         tray.Visible = true;
         tray.DoubleClick += delegate { OpenDashboard(); };
         Application.ApplicationExit += delegate { tray.Visible = false; if (trayIcon != null) trayIcon.Dispose(); Audit("tray_stopped", "user_exit"); mutex.Dispose(); };
-        Audit("tray_started", "native_dotnet_one_account_exe; read_only");
+        Audit("tray_started", "native_dotnet_one_account_exe; host_agent_embedded=true; read_only");
         windowsStartupItem.Checked = WindowsStartupEnabled();
-        strategyPolicyItem.Checked = StrategyPolicyEnabled();
+        if (Profile == "simulation") RebuildStrategyPolicyMenu();
+        else strategyPolicyItem.Checked = StrategyPolicyEnabled();
+        RefreshAuthorizationKeyStatus();
         RefreshStatus();
         Timer timer = new Timer();
         timer.Interval = 30000;
@@ -170,6 +217,115 @@ internal static class BigQMTAccountTray
         return Directory.GetParent(Application.StartupPath).FullName;
     }
 
+    private static System.Collections.Generic.Dictionary<string, object> LoadMachineLocal()
+    {
+        try
+        {
+            string path = Path.Combine(RootPath(), "config", "machine.local.json");
+            if (!File.Exists(path)) return new System.Collections.Generic.Dictionary<string, object>();
+            object root = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path, Encoding.UTF8));
+            return root as System.Collections.Generic.Dictionary<string, object>
+                ?? new System.Collections.Generic.Dictionary<string, object>();
+        }
+        catch { return new System.Collections.Generic.Dictionary<string, object>(); }
+    }
+
+    private static string NestedConfigString(System.Collections.Generic.Dictionary<string, object> root, string section, string key)
+    {
+        object sectionValue;
+        if (!root.TryGetValue(section, out sectionValue)) return "";
+        var sectionMap = sectionValue as System.Collections.Generic.Dictionary<string, object>;
+        if (sectionMap == null) return "";
+        object value;
+        return sectionMap.TryGetValue(key, out value) && value != null ? Convert.ToString(value).Trim() : "";
+    }
+
+    private static void LoadRuntimeNodeConfig()
+    {
+        var machine = LoadMachineLocal();
+        configuredHostId = NestedConfigString(machine, "coordinator", "host_id");
+        configuredCoordinatorEndpoint = NestedConfigString(machine, "coordinator", "endpoint");
+        configuredFactSecretPath = NestedConfigString(machine, "host_agent", "fact_secret_path");
+        if (configuredHostId.Length == 0) configuredHostId = "192.0.2.105";
+        if (configuredCoordinatorEndpoint.Length == 0) configuredCoordinatorEndpoint = "http://192.0.2.121:18443";
+    }
+
+    private static string HostId()
+    {
+        return configuredHostId.Length == 0 ? "192.0.2.105" : configuredHostId;
+    }
+
+    private static string ShadowCoordinatorEndpoint()
+    {
+        try
+        {
+            Uri uri = new Uri(configuredCoordinatorEndpoint);
+            UriBuilder builder = new UriBuilder(uri);
+            builder.Port = 18666;
+            builder.Path = "/api/v1/facts/ingest";
+            builder.Query = "";
+            return builder.Uri.ToString();
+        }
+        catch { return "http://192.0.2.121:18666/api/v1/facts/ingest"; }
+    }
+
+    private static string FactSecretPath()
+    {
+        string configured = configuredFactSecretPath;
+        if (configured.Length > 0)
+        {
+            configured = Environment.ExpandEnvironmentVariables(configured);
+            if (!Path.IsPathRooted(configured)) configured = Path.Combine(RootPath(), configured);
+            if (File.Exists(configured)) return configured;
+        }
+        string safeHost = HostId().Replace('.', '_').Replace(':', '_').Replace('/', '_');
+        string shortHost = safeHost;
+        int lastSeparator = safeHost.LastIndexOf('_');
+        if (lastSeparator >= 0 && lastSeparator + 1 < safeHost.Length) shortHost = safeHost.Substring(lastSeparator + 1);
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Kitling", "BigQMT");
+        string[] candidates = new string[] {
+            Path.Combine(root, "host-facts", "host-" + safeHost + "-fact-shadow.json"),
+            Path.Combine(root, "host-facts", "host-" + shortHost + "-fact-shadow-20260917.json"),
+            Path.Combine(root, "secrets", "host-" + safeHost + "-fact-shadow.json"),
+            Path.Combine(root, "secrets", "host-" + shortHost + "-fact-shadow.json")
+        };
+        foreach (string candidate in candidates) if (File.Exists(candidate)) return candidate;
+        return candidates[0];
+    }
+
+    private static string LoadConfiguredAccount()
+    {
+        // The public source contains synthetic account IDs only.  A deployed
+        // host may override the profile account in the ignored local config;
+        // this keeps the native tray, Redis RPC namespace and Coordinator
+        // heartbeat on the same account without publishing broker identifiers.
+        try
+        {
+            string path = Path.Combine(RootPath(), "config", "machine.local.json");
+            if (!File.Exists(path)) return DefaultAccount;
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            object root = serializer.DeserializeObject(json);
+            var rootMap = root as System.Collections.Generic.Dictionary<string, object>;
+            object environments;
+            if (rootMap == null || !rootMap.TryGetValue("environments", out environments)) return DefaultAccount;
+            var envMap = environments as System.Collections.Generic.Dictionary<string, object>;
+            object profileNode;
+            if (envMap == null || !envMap.TryGetValue(Profile, out profileNode)) return DefaultAccount;
+            var profileMap = profileNode as System.Collections.Generic.Dictionary<string, object>;
+            object account;
+            if (profileMap == null || !profileMap.TryGetValue("account_id", out account)) return DefaultAccount;
+            string value = Convert.ToString(account);
+            return string.IsNullOrWhiteSpace(value) ? DefaultAccount : value.Trim();
+        }
+        catch
+        {
+            // A malformed local override must not stop the status tray.  The
+            // Python preflight remains responsible for rejecting bad config.
+            return DefaultAccount;
+        }
+    }
+
     // The msys2 build of redis-server.exe understands POSIX-style mount paths
     // such as /cygdrive/f/... but misinterprets a raw Windows "F:\..." argument
     // as a relative path under the current directory. Convert drive paths so the
@@ -181,6 +337,40 @@ internal static class BigQMTAccountTray
         if (p.Length >= 2 && p[1] == ':')
             return "/cygdrive/" + char.ToLowerInvariant(p[0]) + p.Substring(2);
         return p;
+    }
+
+    // The checked-in Redis templates intentionally use a neutral historical
+    // root so they are safe to publish.  Before starting Redis on a host,
+    // materialize a local config with the actual project root.  This keeps a
+    // migrated tray independent of C:\BigQMT and avoids the MSYS2 path/config
+    // failure that previously left the tray red after auto-repair.
+    private static string PrepareRedisConfig()
+    {
+        string template = Path.Combine(RootPath(), "config", "redis",
+            Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
+        string directory = Path.Combine(RootPath(), "runtime_data", "redis", Profile);
+        Directory.CreateDirectory(directory);
+        string materialized = Path.Combine(directory, "redis-autostart.conf");
+        string root = ToMsysPath(RootPath());
+        string text = File.ReadAllText(template, Encoding.UTF8)
+            .Replace("C:/BigQMT/work/kitling_bigqmt", root)
+            .Replace("C:\\BigQMT\\work\\kitling_bigqmt", root);
+        File.WriteAllText(materialized, text, new UTF8Encoding(false));
+        return materialized;
+    }
+
+    private static void StartRedisProcess()
+    {
+        string config = PrepareRedisConfig();
+        string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect",
+            "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
+        ProcessStartInfo info = new ProcessStartInfo();
+        info.FileName = exe;
+        info.Arguments = "\"" + ToMsysPath(config) + "\"";
+        info.WorkingDirectory = RootPath();
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        Process.Start(info);
     }
 
     private static bool TcpAvailable(int port)
@@ -213,6 +403,7 @@ internal static class BigQMTAccountTray
 
     private static void RefreshStatus()
     {
+        RefreshAuthorizationKeyStatus();
         bool redis = TcpAvailable(RedisPort);
         bool dashboard = DashboardAvailable();
         string qmt = QmtStatus();
@@ -228,19 +419,27 @@ internal static class BigQMTAccountTray
         string detail = "Redis " + (redis ? "正常" : "不可达")
             + "｜看板 " + (dashboard ? "正常" : "不可达")
             + "｜" + snapshotFreshness
-            + "｜订单锁定";
+            + "｜" + (Profile == "simulation"
+                ? (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜本机执行已开放" : "模拟授权缺失｜订单锁定")
+                : "正式只读｜订单锁定");
         statusItem.Text = ProfileTitle + " " + Account + "：" + state + "（" + detail + "）";
         qmtItem.Text = "QMT：" + (qmt == "RUNNING" ? "运行中（Bridge Ping 为账户链路证明）" : "未运行（将自动补拉）");
         miniQmtItem.Text = "MiniQMT：" + (miniQmt == "RUNNING" ? "运行中（免密，PROCESS ONLY）" : "未运行（将自动补拉）");
         redisItem.Text = "Redis：" + (redis ? "正常" : "不可达（将自动补拉）") + "（端口 " + RedisPort + "）";
         bridgeItem.Text = "Bridge：" + bridgeState + "｜快照 " + runtimeHealth;
         dashboardItem.Text = "Dashboard：" + (dashboard ? "正常" : "不可达（将自动补拉）") + "（端口 " + DashboardPort + "）";
+        hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
+        if (strategyDeploymentItem != null && lastStrategyDeploymentState.Length > 0)
+            strategyDeploymentItem.Text = "策略部署：" + lastStrategyDeploymentState + "（安装不启动）";
+        if (Profile == "simulation") RebuildStrategyPolicyMenu();
+        RefreshStrategyRuntimeStatus();
         RefreshCoordinatorPreview();
         RefreshCoordinatorIntentPreview();
         string tip = ProfileTitle + " " + Account + "｜" + state;
         tray.Text = tip.Substring(0, Math.Min(63, tip.Length));
         SetIcon(state);
         SendCoordinatorHeartbeat(qmt, miniQmt, redis, dashboard);
+        hostAgentItem.Text = "Host Agent：" + hostAgentState + "｜" + HostId() + "｜" + hostAgentDetail;
         Audit("status_refreshed", state + "; " + detail);
         AutoStartMissingQmt(qmt);
         AutoStartMissingMiniQmt(miniQmt);
@@ -270,7 +469,22 @@ internal static class BigQMTAccountTray
         // Coordinator receives a sanitized read-only service snapshot only.
         // The helper has no QMT, Redis, credential, order or shell interface.
         string signature = qmt + "/" + miniQmt + "/" + redis + "/" + dashboard + "/" + bridgeLiveHealthy;
+        // Strategy execution visibility is an observation only.  It reports
+        // local policy and liveness, never a Key, credential, order or intent.
+        string observedStrategy = Profile == "simulation" ? StrategyIdV1115 : "BIGQMT_BRIDGE";
+        string observedVersion = Profile == "simulation" ? "v1.1.15" : "0.3.26";
+        bool policyEnabled = Profile == "simulation" ? StrategyAutoRunEnabled(StrategyIdV1115) : StrategyPolicyEnabled();
+        string strategyState = !policyEnabled ? "STOPPED" : (bridgeLiveHealthy ? "RUNNING" : "DEGRADED");
         bool ok;
+        // Append observability arguments in a second invocation-compatible
+        // command construction.  Keeping them as scalar allow-listed values
+        // prevents local paths or secrets entering the heartbeat envelope.
+        string observableArgs = " --strategy-id \"" + observedStrategy + "\""
+            + " --strategy-version \"" + observedVersion + "\""
+            + " --strategy-state " + strategyState
+            + " --strategy-policy-enabled " + (policyEnabled ? "true" : "false")
+            + " --authorization-key-state " + lastAuthorizationKeyState
+            + " --bridge-version \"" + (Profile == "production_readonly" ? "0.3.26" : "") + "\"";
         string output = RunPython(
             "send_host_agent_heartbeat.py",
             "--profile " + Profile
@@ -278,13 +492,106 @@ internal static class BigQMTAccountTray
             + " --miniqmt " + (miniQmt == "RUNNING" ? "UP" : "DOWN")
             + " --redis " + (redis ? "UP" : "DOWN")
             + " --bridge " + (bridgeLiveHealthy ? "UP" : "DOWN")
-            + " --dashboard " + (dashboard ? "UP" : "DOWN"),
+            + " --dashboard " + (dashboard ? "UP" : "DOWN") + observableArgs,
             6000,
             out ok
         );
+        if (ok)
+        {
+            hostAgentState = "心跳正常";
+            hostAgentDetail = "只读服务已上报";
+        }
+        else
+        {
+            hostAgentState = "心跳失败";
+            hostAgentDetail = "Coordinator不可达，继续本地运行";
+        }
         if (!ok || signature != lastCoordinatorHeartbeatState)
             Audit("coordinator_heartbeat", ok ? "accepted; " + signature : output);
         lastCoordinatorHeartbeatState = signature;
+    }
+
+    private static void HostAgentSyncNow()
+    {
+        // Keep the menu responsive: the facts-only uploader may wait on a
+        // network timeout.  It never has an order, lease, QMT or Redis write
+        // path, and the normal 5-minute scheduler remains unchanged.
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                nextFactDeliveryAttempt = DateTime.MinValue;
+                HostFactDeliveryIfDue(DateTime.Now);
+                Audit("host_agent_manual_sync", hostAgentState + "; " + hostAgentDetail);
+            }
+            catch (Exception error)
+            {
+                hostAgentState = "同步异常";
+                hostAgentDetail = error.GetType().Name;
+                Audit("host_agent_manual_sync_error", error.GetType().Name + ": " + error.Message);
+            }
+        });
+    }
+
+    private static void StrategyDeploymentIfDue(DateTime now, bool manual)
+    {
+        if (!manual && now < nextStrategyDeploymentAttempt) return;
+        nextStrategyDeploymentAttempt = now.AddSeconds(30);
+        bool ok;
+        string output = RunPython("poll_strategy_deployments.py", "--once", 45000, out ok);
+        string state;
+        int localInstalled = LocalInstalledCount();
+        if (localInstalled > 0)
+        {
+            state = "已安装（未启动）; 本地 " + localInstalled + " 条";
+        }
+        else if (output.IndexOf("\"status\": \"ok\"") >= 0)
+        {
+            int marker = output.IndexOf("\"deployments\":", StringComparison.Ordinal);
+            if (marker >= 0) state = "无待安装请求; 本地无安装";
+            else state = "拉取完成; 本地无安装";
+        }
+        else if (output.IndexOf("library_root is not configured", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            state = "等待本机策略库配置";
+        }
+        else if (output.IndexOf("\"status\": \"busy\"", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            state = "其他托盘正在拉取";
+        }
+        else
+        {
+            state = "拉取失败（保留订单锁）";
+        }
+        if (manual || state != lastStrategyDeploymentState)
+            Audit("strategy_deployment_poll", state + "; orders_enabled=false; run_after_install=false");
+        lastStrategyDeploymentState = state;
+        if (strategyDeploymentItem != null)
+            strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
+        // Hide the strategy run toggles when nothing is installed: the
+        // toggles are meaningless without a deployed strategy to run.
+        if (Profile == "simulation" && strategyPolicyMenu != null)
+            strategyPolicyMenu.Visible = localInstalled > 0;
+        else if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = true;
+    }
+
+    private static int LocalInstalledCount()
+    {
+        bool ok;
+        string output = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (!ok) return 0;
+        // Avoid System.Web.Script.Serialization quirks: count "strategy_id"
+        // occurrences inside the JSON returned by --list.  Each installed
+        // entry contributes exactly one such key, so this is a stable
+        // approximation and matches the on-disk truth regardless of how the
+        // serializer shapes nested arrays.
+        int count = 0; int index = 0;
+        while ((index = output.IndexOf("\"strategy_id\"", index, StringComparison.Ordinal)) >= 0)
+        {
+            count++; index += "\"strategy_id\"".Length;
+        }
+        return count;
     }
 
     private static void RefreshCoordinatorPreview()
@@ -425,11 +732,10 @@ internal static class BigQMTAccountTray
         nextAutoRedisAttempt = DateTime.UtcNow.AddMinutes(2);
         try
         {
-            string config = Path.Combine(RootPath(), "config", "redis", Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
             string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect", "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
             if (!File.Exists(exe)) { Audit("redis_auto_start_error", "missing redis-server: " + exe); return; }
-            Process.Start(exe, ToMsysPath(config));
-            Audit("redis_auto_start_requested", config);
+            StartRedisProcess();
+            Audit("redis_auto_start_requested", Profile);
         }
         catch (Exception error) { Audit("redis_auto_start_error", error.GetType().Name + ": " + error.Message); }
     }
@@ -470,6 +776,209 @@ internal static class BigQMTAccountTray
             }
         }
         catch (Exception error) { return error.GetType().Name + ": " + error.Message; }
+    }
+
+    private static string RunPythonWithSecretEnvironment(string scriptName, string arguments, string environmentName, string secret, int timeout, out bool ok)
+    {
+        // The Key is never placed on the command line, written to a file or
+        // included in an audit entry.  It exists only in this tray process and
+        // the short-lived child process environment used to write Windows
+        // Credential Manager.
+        ok = false;
+        try
+        {
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = "py.exe";
+            info.Arguments = "-3.12 \"" + Path.Combine(RootPath(), "scripts", scriptName) + "\" " + arguments;
+            info.WorkingDirectory = RootPath(); info.UseShellExecute = false; info.CreateNoWindow = true;
+            info.RedirectStandardOutput = true; info.RedirectStandardError = true;
+            info.EnvironmentVariables[environmentName] = secret;
+            using (Process process = Process.Start(info))
+            {
+                string stdout = process.StandardOutput.ReadToEnd(); string stderr = process.StandardError.ReadToEnd();
+                if (!process.WaitForExit(timeout)) { try { process.Kill(); } catch { } return stdout + stderr; }
+                ok = process.ExitCode == 0; return stdout + stderr;
+            }
+        }
+        catch (Exception error) { return error.GetType().Name + ": " + error.Message; }
+    }
+
+    private static void RefreshAuthorizationKeyStatus()
+    {
+        bool ok;
+        string output = RunPython(
+            "manage_order_authorization_key.py",
+            "status --profile " + Profile + " --account \"" + Account + "\"",
+            15000,
+            out ok
+        );
+        string state = JsonString(output, "state");
+        string fingerprint = JsonString(output, "fingerprint");
+        string boundAccount = JsonString(output, "account_id");
+        if (state.Length == 0) state = ok ? "UNKNOWN" : "ERROR";
+        string text;
+        if (state == "VALID")
+        {
+            string shortFingerprint = fingerprint.Length > 15 ? fingerprint.Substring(0, 15) + "…" : fingerprint;
+            text = "有效｜账户 " + boundAccount + (shortFingerprint.Length > 0 ? "｜" + shortFingerprint : "")
+                + "｜仍需全部执行门禁";
+        }
+        else if (state == "MISSING") text = "未安装｜账户只读";
+        else if (state == "ACCOUNT_MISMATCH") text = "账户不匹配｜账户只读";
+        else if (state == "CREDENTIAL_STORE_UNAVAILABLE") text = "凭据库不可用｜账户只读";
+        else text = "无效（" + state + "）｜账户只读";
+        if (authorizationKeyItem != null) authorizationKeyItem.Text = "下单授权 Key：" + text;
+        if (state != lastAuthorizationKeyState)
+        {
+            string auditFingerprint = fingerprint.Length > 15 ? fingerprint.Substring(0, 15) : fingerprint;
+            Audit("authorization_key_status", "state=" + state + "; account=" + boundAccount + "; fingerprint=" + auditFingerprint + "; secret_logged=false");
+        }
+        lastAuthorizationKeyState = state;
+    }
+
+    private static void ShowAuthorizationKeyStatus()
+    {
+        RefreshAuthorizationKeyStatus();
+        string explanation = lastAuthorizationKeyState == "VALID"
+            ? "本账户授权 Key 有效。\n\nKey 仅提供下单资格，仍须同时通过策略开关、运行窗口、Coordinator 冲突检查、风控和券商前置校验。"
+            : "本账户没有有效授权 Key，因此只允许只读账户操作，不能进入下单执行门禁。";
+        MessageBox.Show(explanation, ProfileTitle + "｜授权 Key", MessageBoxButtons.OK,
+            lastAuthorizationKeyState == "VALID" ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        Audit("authorization_key_viewed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+    }
+
+    private static void InstallAuthorizationKey()
+    {
+        string first = ""; string second = "";
+        try
+        {
+            if (!PromptPassword(ProfileTitle + "｜加入授权 Key", "输入本账户授权 Key（至少 10 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜确认授权 Key", "再次输入本账户授权 Key：", out second)) return;
+            if (first != second)
+            {
+                MessageBox.Show("两次输入的授权 Key 不一致，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_rejected", "confirmation_mismatch; secret_logged=false");
+                return;
+            }
+            if (first.Trim().Length < 10)
+            {
+                MessageBox.Show("授权 Key 至少需要 10 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_rejected", "key_too_short; secret_logged=false");
+                return;
+            }
+            bool ok;
+            string output = RunPythonWithSecretEnvironment(
+                "manage_order_authorization_key.py",
+                "set --profile " + Profile + " --account \"" + Account + "\"",
+                "BIGQMT_ORDER_AUTHORIZATION_KEY_INPUT",
+                first,
+                15000,
+                out ok
+            );
+            RefreshAuthorizationKeyStatus();
+            if (ok && lastAuthorizationKeyState == "VALID")
+            {
+                MessageBox.Show("授权 Key 已保存到本机 Windows 凭据管理器。\n\n它只对当前托盘账户生效；Key 有效不代表绕过其他下单门禁。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Audit("authorization_key_installed", "account=" + Account + "; secret_logged=false");
+            }
+            else
+            {
+                MessageBox.Show("授权 Key 保存失败：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("authorization_key_install_failed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+            }
+        }
+        finally
+        {
+            first = ""; second = "";
+        }
+    }
+
+    private static void DeleteAuthorizationKey()
+    {
+        string expectedHash = NestedConfigString(LoadMachineLocal(), "tray", "delete_strategy_password_sha256").ToLowerInvariant();
+        if (expectedHash.Length != 64)
+        {
+            MessageBox.Show("未配置删除密码散列（tray.delete_strategy_password_sha256），无法删除授权 Key。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "missing_password_hash; secret_logged=false");
+            return;
+        }
+        string password;
+        if (!PromptPassword("删除本账户授权 Key", "输入托盘删除密码：", out password) || password.Length == 0)
+        {
+            Audit("authorization_key_delete_cancelled", "user_cancelled; secret_logged=false");
+            return;
+        }
+        if (Sha256Hex(password) != expectedHash)
+        {
+            MessageBox.Show("密码错误，授权 Key 未删除。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_blocked", "bad_password; secret_logged=false");
+            return;
+        }
+        if (MessageBox.Show("删除当前账户的本机授权 Key？\n\n删除后该托盘立即退回账户只读状态。", ProfileTitle,
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        bool ok;
+        string output = RunPython(
+            "manage_order_authorization_key.py",
+            "delete --profile " + Profile + " --account \"" + Account + "\"",
+            15000,
+            out ok
+        );
+        RefreshAuthorizationKeyStatus();
+        if (ok && lastAuthorizationKeyState == "MISSING")
+        {
+            MessageBox.Show("授权 Key 已删除，本账户现为只读。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Audit("authorization_key_deleted", "account=" + Account + "; secret_logged=false");
+        }
+        else
+        {
+            MessageBox.Show("授权 Key 删除结果无法确认：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("authorization_key_delete_failed", "state=" + lastAuthorizationKeyState + "; secret_logged=false");
+        }
+    }
+
+    private static void ConfigureDeletePassword()
+    {
+        string first = ""; string second = "";
+        try
+        {
+            if (!PromptPassword(ProfileTitle + "｜设置删除密码", "输入托盘删除密码（至少 8 个字符）：", out first)) return;
+            if (!PromptPassword(ProfileTitle + "｜确认删除密码", "再次输入托盘删除密码：", out second)) return;
+            if (first != second)
+            {
+                MessageBox.Show("两次输入的删除密码不一致，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "confirmation_mismatch; secret_logged=false");
+                return;
+            }
+            if (first.Length < 8)
+            {
+                MessageBox.Show("删除密码至少需要 8 个字符，未保存。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_rejected", "password_too_short; secret_logged=false");
+                return;
+            }
+            bool ok;
+            string output = RunPythonWithSecretEnvironment(
+                "manage_tray_delete_password.py",
+                "set",
+                "BIGQMT_TRAY_DELETE_PASSWORD_INPUT",
+                first,
+                15000,
+                out ok
+            );
+            if (ok)
+            {
+                MessageBox.Show("托盘删除密码已保存为本机散列。\n\n删除策略或授权 Key 时将要求输入此密码。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Audit("tray_delete_password_configured", "secret_logged=false");
+            }
+            else
+            {
+                MessageBox.Show("删除密码无法保存：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Audit("tray_delete_password_configure_failed", "secret_logged=false");
+            }
+        }
+        finally
+        {
+            first = ""; second = "";
+        }
     }
 
     private static void SetIcon(string state)
@@ -532,9 +1041,8 @@ internal static class BigQMTAccountTray
     private static void StartRedis()
     {
         if (TcpAvailable(RedisPort)) { MessageBox.Show("Redis 已运行。", ProfileTitle); return; }
-        string config = Path.Combine(RootPath(), "config", "redis", Profile == "simulation" ? "redis-simulation.conf" : "redis-production.conf");
         string exe = Path.Combine(RootPath(), "runtime_data", "redis", "_package_inspect", "Redis-8.10.1-Windows-x64-msys2", "redis-server.exe");
-        try { Process.Start(exe, ToMsysPath(config)); MessageBox.Show("Redis 启动请求已提交。", ProfileTitle); Audit("redis_start_requested", config); }
+        try { StartRedisProcess(); MessageBox.Show("Redis 启动请求已提交。", ProfileTitle); Audit("redis_start_requested", Profile); }
         catch (Exception error) { MessageBox.Show("Redis 无法启动：" + error.Message, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning); Audit("redis_start_error", error.Message); }
     }
 
@@ -584,12 +1092,99 @@ internal static class BigQMTAccountTray
 
     private static bool StrategyPolicyEnabled()
     {
+        // Production-only: the formal recovery intent flag.  Simulation uses
+        // the per-strategy toggles instead (see StrategyAutoRunEnabled + the
+        // dynamic 策略运行开关 submenu).
         try
         {
             string text = File.ReadAllText(Path.Combine(RootPath(), "config", "strategy_runtime_policy.json"), Encoding.UTF8);
-            return Profile == "simulation" ? text.IndexOf("\"v1_1_15_auto_run_enabled\": true") >= 0 : text.IndexOf("\"strategy_recovery_enabled\": true") >= 0;
+            return text.IndexOf("\"strategy_recovery_enabled\": true") >= 0;
         }
         catch { return false; }
+    }
+
+    private static bool StrategyAutoRunEnabled(string strategyId)
+    {
+        // Local truth: simulation.strategies.<strategy_id>.auto_run_enabled.
+        // Missing strategy or malformed config is fail-closed (false).
+        try
+        {
+            string text = File.ReadAllText(Path.Combine(RootPath(), "config", "strategy_runtime_policy.json"), Encoding.UTF8);
+            int idPos = text.IndexOf("\"" + strategyId + "\"", StringComparison.Ordinal);
+            if (idPos < 0) return false;
+            string window = text.Substring(idPos, Math.Min(180, text.Length - idPos));
+            int flagPos = window.IndexOf("\"auto_run_enabled\"", StringComparison.Ordinal);
+            if (flagPos < 0) return false;
+            string snippet = window.Substring(flagPos, Math.Min(48, window.Length - flagPos));
+            // JSON normalization writes ': true' / ': false'; only the true
+            // form matches the substring below, keeping false fail-closed.
+            return snippet.IndexOf(": true", StringComparison.Ordinal) >= 0
+                || snippet.IndexOf(":true", StringComparison.Ordinal) >= 0;
+        }
+        catch { return false; }
+    }
+
+    private static void SetStrategyAutoRun(string strategyId, bool enabled)
+    {
+        bool ok; string output = RunPython("set_strategy_auto_run.py", "--strategy-id \"" + strategyId + "\" --enabled " + (enabled ? "true" : "false"), 5000, out ok);
+        if (!ok)
+        {
+            MessageBox.Show("策略运行开关无法更新：\n" + output, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            // Flip the checkbox back but suppress the CheckedChanged loopback.
+            RebuildStrategyPolicyMenu();
+            return;
+        }
+        Audit("strategy_policy", (enabled ? "enabled" : "disabled") + " " + strategyId);
+    }
+
+    private static System.Collections.Generic.List<string> lastPolicyMenuIds =
+        new System.Collections.Generic.List<string>();
+    private static bool policyMenuRebuilding = false;
+
+    private static void RebuildStrategyPolicyMenu()
+    {
+        if (Profile != "simulation" || strategyPolicyMenu == null) return;
+        System.Collections.Generic.List<string> ids = new System.Collections.Generic.List<string>();
+        bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (ok)
+        {
+            // Collect installed strategy ids; an id that has no toggle keeps
+            // whatever policy state it had (no write, no delete of entries).
+            foreach (var entry in ParseInstalledEntries(listed))
+                if (!ids.Contains(entry["strategy_id"])) ids.Add(entry["strategy_id"]);
+        }
+        bool same = ids.Count == lastPolicyMenuIds.Count;
+        if (same) for (int i = 0; i < ids.Count; i++) if (ids[i] != lastPolicyMenuIds[i]) { same = false; break; }
+        if (same) return; // no change, avoid flicker
+
+        policyMenuRebuilding = true;
+        try
+        {
+            strategyPolicyMenu.DropDownItems.Clear();
+            if (ids.Count == 0)
+            {
+                ToolStripMenuItem empty = new ToolStripMenuItem("（无已安装策略）");
+                empty.Enabled = false;
+                strategyPolicyMenu.DropDownItems.Add(empty);
+            }
+            else
+            {
+                foreach (string id in ids)
+                {
+                    ToolStripMenuItem item = new ToolStripMenuItem("启用 " + id + " 自动运行");
+                    item.CheckOnClick = true;
+                    item.Checked = StrategyAutoRunEnabled(id);
+                    string captured = id;
+                    item.CheckedChanged += delegate
+                    {
+                        if (!policyMenuRebuilding) SetStrategyAutoRun(captured, item.Checked);
+                    };
+                    strategyPolicyMenu.DropDownItems.Add(item);
+                }
+            }
+            lastPolicyMenuIds = new System.Collections.Generic.List<string>(ids);
+        }
+        finally { policyMenuRebuilding = false; }
     }
 
     private static void SetStrategyPolicy(bool enabled)
@@ -600,10 +1195,343 @@ internal static class BigQMTAccountTray
         Audit("strategy_policy", enabled ? "enabled" : "disabled");
     }
 
+    private static void UninstallInstalledStrategies()
+    {
+        string expectedHash = NestedConfigString(LoadMachineLocal(), "tray", "delete_strategy_password_sha256").ToLowerInvariant();
+        if (expectedHash.Length != 64)
+        {
+            MessageBox.Show("未配置删除密码散列（tray.delete_strategy_password_sha256）。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_blocked", "missing_password_hash");
+            return;
+        }
+        string password;
+        if (!PromptPassword("删除已安装策略", "输入托盘删除密码：", out password) || password.Length == 0)
+        {
+            Audit("strategy_uninstall_cancelled", "user_cancelled");
+            return;
+        }
+        if (Sha256Hex(password) != expectedHash)
+        {
+            MessageBox.Show("密码错误。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_blocked", "bad_password");
+            return;
+        }
+
+        bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+        if (!ok)
+        {
+            MessageBox.Show("无法列出已安装策略：\n" + listed, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("strategy_uninstall_list_error", listed);
+            return;
+        }
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> entries = ParseInstalledEntries(listed);
+        if (entries.Count == 0)
+        {
+            MessageBox.Show("本机没有已安装策略。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Audit("strategy_uninstall_cancelled", "no_installs");
+            return;
+        }
+        int[] selected = PromptStrategySelection(entries);
+        if (selected == null)
+        {
+            Audit("strategy_uninstall_cancelled", "no_selection");
+            return;
+        }
+        if (selected.Length == 0)
+        {
+            // The form refuses to close with 0 rows selected, so this is a
+            // silent fallback only; never pop another dialog here.
+            Audit("strategy_uninstall_cancelled", "empty_selection");
+            return;
+        }
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> toDelete =
+            new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>>();
+        foreach (int index in selected)
+        {
+            if (index >= 0 && index < entries.Count) toDelete.Add(entries[index]);
+        }
+        if (toDelete.Count == 0)
+        {
+            Audit("strategy_uninstall_cancelled", "empty_selection");
+            return;
+        }
+        System.Text.StringBuilder preview = new System.Text.StringBuilder();
+        foreach (var entry in toDelete)
+        {
+            preview.Append("  • ").Append(entry["strategy_id"]).Append("  ").Append(entry["version"]).Append("  ").Append(entry["build_id"]).Append("\n");
+        }
+        if (MessageBox.Show(
+            "将永久删除本机以下 " + toDelete.Count + " 个已安装策略（不影响 NAS 候选库与 Coordinator 队列）：\n\n" +
+            preview.ToString() +
+            "\n确认继续？",
+            ProfileTitle,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning) != DialogResult.Yes)
+        {
+            Audit("strategy_uninstall_cancelled", "user_declined_confirmation");
+            return;
+        }
+
+        int removed = 0; int missing = 0; System.Text.StringBuilder errors = new System.Text.StringBuilder();
+        foreach (var entry in toDelete)
+        {
+            string args = "--strategy-id \"" + entry["strategy_id"] + "\" --version \"" + entry["version"] + "\" --build-id \"" + entry["build_id"] + "\"";
+            bool itemOk; string output = RunPython("uninstall_strategy_package.py", args, 30000, out itemOk);
+            if (output.IndexOf("\"status\": \"uninstalled\"") >= 0)
+            {
+                removed++;
+                Audit("strategy_uninstalled", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"] + "; orders_enabled=false; run_after_install=false");
+                // Clear the per-strategy run switch so a deleted strategy is
+                // also off in policy (fail-closed; a re-install starts disabled).
+                if (Profile == "simulation")
+                {
+                    bool clearOk; string clearOut = RunPython("set_strategy_auto_run.py", "--strategy-id \"" + entry["strategy_id"] + "\" --clear", 5000, out clearOk);
+                    if (clearOk) Audit("strategy_policy_cleared", entry["strategy_id"]);
+                    else Audit("strategy_policy_clear_error", entry["strategy_id"] + ": " + clearOut);
+                }
+            }
+            else if (output.IndexOf("\"status\": \"not_found\"") >= 0) { missing++; Audit("strategy_uninstall_missing", entry["strategy_id"] + " " + entry["version"] + " " + entry["build_id"]); }
+            else
+            {
+                errors.Append(entry["strategy_id"]).Append(" → ").Append(output).Append("\n");
+                Audit("strategy_uninstall_error", entry["strategy_id"] + ": " + output);
+            }
+        }
+        string summary = "删除完成：成功 " + removed + " 条" + (missing > 0 ? "，目标已不存在 " + missing + " 条" : "") + (errors.Length > 0 ? "，失败 " + errors.Length + " 条" : "");
+        MessageBox.Show(summary + (errors.Length > 0 ? "\n\n失败详情：\n" + errors.ToString() : ""), ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (removed > 0 || missing > 0) RefreshLocalInstallMenuState();
+    }
+
+    private static System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> ParseInstalledEntries(string listJson)
+    {
+        System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> result =
+            new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>>();
+        int arrayStart = listJson.IndexOf("\"installed\":", StringComparison.Ordinal);
+        if (arrayStart < 0) return result;
+        int arrayOpen = listJson.IndexOf('[', arrayStart);
+        if (arrayOpen < 0) return result;
+        int cursor = arrayOpen + 1;
+        while (cursor < listJson.Length)
+        {
+            int objStart = listJson.IndexOf('{', cursor);
+            if (objStart < 0) break;
+            int objEnd = MatchClosingBrace(listJson, objStart);
+            if (objEnd < 0) break;
+            string entry = listJson.Substring(objStart, objEnd - objStart + 1);
+            var map = new System.Collections.Generic.Dictionary<string, string>();
+            foreach (string key in new[] { "strategy_id", "version", "build_id", "artifact_count" })
+            {
+                map[key] = ExtractJsonString(entry, key);
+            }
+            if (map["strategy_id"].Length > 0 && map["version"].Length > 0 && map["build_id"].Length > 0)
+                result.Add(map);
+            cursor = objEnd + 1;
+        }
+        return result;
+    }
+
+    private static void RefreshLocalInstallMenuState()
+    {
+        // Re-derive the strategy deployment menu text purely from the local
+        // install_root.  This is what the user sees right after an uninstall,
+        // before the next 30s Coordinator poll tick has run.
+        int localInstalled = LocalInstalledCount();
+        string state = localInstalled > 0
+            ? "已安装（未启动）; 本地 " + localInstalled + " 条"
+            : "无待安装请求; 本地无安装";
+        lastStrategyDeploymentState = state;
+        if (strategyDeploymentItem != null)
+            strategyDeploymentItem.Text = "策略部署：" + state + "（安装不启动）";
+        if (Profile == "simulation" && strategyPolicyMenu != null)
+            strategyPolicyMenu.Visible = localInstalled > 0;
+        else if (strategyPolicyItem != null)
+            strategyPolicyItem.Visible = true;
+        RebuildStrategyPolicyMenu();
+        Audit("strategy_uninstall_menu_refreshed", state + "; orders_enabled=false; visible=" + (localInstalled > 0));
+    }
+
+    private static int[] PromptStrategySelection(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, string>> entries)
+    {
+        System.Collections.Generic.List<string> rows = new System.Collections.Generic.List<string>();
+        foreach (var entry in entries)
+        {
+            rows.Add(entry["strategy_id"] + "\n    " + entry["version"] + "  " + entry["build_id"] + "  " +
+                     "(" + (entry.ContainsKey("artifact_count") && entry["artifact_count"].Length > 0 ? entry["artifact_count"] : "?") + " 个产物)");
+        }
+        using (UninstallSelectionForm form = new UninstallSelectionForm(rows))
+        {
+            if (form.ShowDialog() != DialogResult.OK) return null;
+            return form.SelectedIndicesCopy();
+        }
+    }
+
+    private static bool PromptPassword(string title, string label, out string password)
+    {
+        password = "";
+        using (PasswordPromptForm form = new PasswordPromptForm(title, label))
+        {
+            return form.ShowDialog() == DialogResult.OK && form.EnteredPassword(out password);
+        }
+    }
+
+    private static int MatchClosingBrace(string text, int openIndex)
+    {
+        // Returns index of the '}' that balances text[openIndex] == '{',
+        // honouring JSON string escapes so braces inside quoted values do
+        // not confuse the matcher.
+        int depth = 0;
+        bool inString = false; bool escape = false;
+        for (int i = openIndex; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (inString)
+            {
+                if (escape) { escape = false; continue; }
+                if (ch == '\\') { escape = true; continue; }
+                if (ch == '"') inString = false;
+                continue;
+            }
+            if (ch == '"') { inString = true; continue; }
+            if (ch == '{') depth++;
+            else if (ch == '}')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    private static string ExtractJsonString(string json, string key)
+    {
+        // Find "key" : "value" with optional whitespace; decode the standard
+        // JSON string escapes we care about.
+        string needle = "\"" + key + "\"";
+        int keyPos = json.IndexOf(needle, StringComparison.Ordinal);
+        if (keyPos < 0) return "";
+        int colon = json.IndexOf(':', keyPos + needle.Length);
+        if (colon < 0) return "";
+        int valueStart = colon + 1;
+        while (valueStart < json.Length && (json[valueStart] == ' ' || json[valueStart] == '\t')) valueStart++;
+        if (valueStart >= json.Length || json[valueStart] != '"') return "";
+        int valueEnd = valueStart + 1;
+        bool escape = false;
+        while (valueEnd < json.Length)
+        {
+            char ch = json[valueEnd];
+            if (escape) { escape = false; valueEnd++; continue; }
+            if (ch == '\\') { escape = true; valueEnd++; continue; }
+            if (ch == '"') break;
+            valueEnd++;
+        }
+        if (valueEnd >= json.Length) return "";
+        string raw = json.Substring(valueStart + 1, valueEnd - valueStart - 1);
+        System.Text.StringBuilder builder = new System.Text.StringBuilder(raw.Length);
+        for (int i = 0; i < raw.Length; i++)
+        {
+            char ch = raw[i];
+            if (ch == '\\' && i + 1 < raw.Length)
+            {
+                char next = raw[i + 1];
+                switch (next)
+                {
+                    case '"': builder.Append('"'); i++; break;
+                    case '\\': builder.Append('\\'); i++; break;
+                    case '/': builder.Append('/'); i++; break;
+                    case 'b': builder.Append('\b'); i++; break;
+                    case 'f': builder.Append('\f'); i++; break;
+                    case 'n': builder.Append('\n'); i++; break;
+                    case 'r': builder.Append('\r'); i++; break;
+                    case 't': builder.Append('\t'); i++; break;
+                    case 'u':
+                        if (i + 5 < raw.Length)
+                        {
+                            int code;
+                            if (int.TryParse(raw.Substring(i + 2, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out code))
+                            {
+                                builder.Append((char)code); i += 5;
+                            }
+                            else builder.Append(ch);
+                        }
+                        else builder.Append(ch);
+                        break;
+                    default: builder.Append(next); i++; break;
+                }
+            }
+            else builder.Append(ch);
+        }
+        return builder.ToString();
+    }
+
+    private static string Sha256Hex(string text)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(text ?? "");
+        byte[] hash;
+        using (SHA256 sha = SHA256.Create()) hash = sha.ComputeHash(bytes);
+        System.Text.StringBuilder builder = new System.Text.StringBuilder(hash.Length * 2);
+        foreach (byte b in hash) builder.Append(b.ToString("x2"));
+        return builder.ToString();
+    }
+
     private static void LockReminder()
     {
-        MessageBox.Show("订单锁保持开启。正式账户永久只读；模拟账户的策略开关本身不直接下单。", ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        Audit("order_lock_viewed", "locked");
+        string keyText = lastAuthorizationKeyState == "VALID"
+            ? "本账户授权 Key 有效，本机可无人值守执行；仍受策略开关、交易时段、对账与风控保护。"
+            : "本账户没有有效授权 Key，当前只能执行账户只读操作，不能下单。";
+        MessageBox.Show(keyText, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        Audit("order_lock_viewed", "authorization_key_state=" + lastAuthorizationKeyState + "; secret_logged=false");
+    }
+
+    private static void RefreshStrategyRuntimeStatus()
+    {
+        if (strategyRuntimeItem == null) return;
+        if (Profile != "simulation")
+        {
+            strategyRuntimeItem.Text = "策略运行状况：BIGQMT_BRIDGE｜正式只读｜策略恢复开关关闭";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：BIGQMT_BRIDGE（正式只读桥接，不执行交易）";
+            return;
+        }
+        int installed = LocalInstalledCount();
+        if (installed == 0)
+        {
+            strategyRuntimeItem.Text = "策略运行状况：未安装策略";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：无（未安装策略）";
+            return;
+        }
+        bool enabled = StrategyAutoRunEnabled(StrategyIdV1115);
+        if (!enabled)
+        {
+            strategyRuntimeItem.Text = "策略运行状况：v1.1.15 已停止｜策略开关关闭";
+            if (currentStrategyItem != null)
+                currentStrategyItem.Text = "当前运行策略：无（v1.1.15 策略开关已关闭）";
+            return;
+        }
+        string health = bridgeLiveHealthy ? "运行就绪" : "降级（Bridge 不可用）";
+        strategyRuntimeItem.Text = "策略运行状况：v1.1.15 " + health
+            + "｜自动运行开｜"
+            + (lastAuthorizationKeyState == "VALID" && LocalSimulationExecutionEnabled() ? "模拟授权有效｜本机执行已开放" : "授权或本机执行未开放｜订单锁定");
+        if (currentStrategyItem != null)
+        {
+            string mode = lastAuthorizationKeyState == "VALID" && LocalSimulationExecutionEnabled()
+                ? "自动执行（模拟账户 " + Account + "）" : "信号对齐（订单锁定）";
+            currentStrategyItem.Text = "当前运行策略：v1.1.15 低频动量轮动（U25 无酒 5 日）｜" + mode;
+        }
+    }
+
+    private static bool LocalSimulationExecutionEnabled()
+    {
+        try
+        {
+            string path = Path.Combine(RootPath(), "runtime_data", "control", "simulation", "runtime_control.json");
+            if (!File.Exists(path)) return false;
+            var map = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as System.Collections.Generic.Dictionary<string, object>;
+            return map != null && Convert.ToBoolean(map["orders_enabled"])
+                && Convert.ToBoolean(map["execution_consumer_enabled"])
+                && string.Equals(Convert.ToString(map["mode"]), "SIMULATION_STRATEGY_EXECUTION_ENABLED", StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     private static void GenerateDiagnosis()
@@ -660,6 +1588,7 @@ internal static class BigQMTAccountTray
         HourlySnapshotIfDue(now);
         BridgeDailyRecordIfDue(now, today);
         HostFactDeliveryIfDue(now);
+        StrategyDeploymentIfDue(now, false);
         if (Profile != "simulation") return;
         CloseShadowIfDue(now, today);
         LakeCycleIfDue(now, today);
@@ -699,9 +1628,11 @@ internal static class BigQMTAccountTray
         // this release.  The command itself also refuses non-18666 endpoints.
         if (now < nextFactDeliveryAttempt) return;
         nextFactDeliveryAttempt = now.AddMinutes(5);
-        string secret = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Kitling", "BigQMT", "secrets", "host-105-fact-shadow.json");
+        string secret = FactSecretPath();
         if (!File.Exists(secret))
         {
+            hostAgentState = "等待 Fact Secret";
+            hostAgentDetail = "本机授权文件不存在";
             Audit("host_fact_delivery_blocked", "fact_secret_missing; orders_enabled=false");
             return;
         }
@@ -712,14 +1643,25 @@ internal static class BigQMTAccountTray
         string auditArg = "\"" + auditPath + "\"";
         string outboxArg = "\"" + outboxPath + "\"";
         bool collected;
-        string collect = RunPython("host_agent\\collect_runtime_fact.py", "--profile " + Profile + " --host-id 192.0.2.105 --audit-path " + auditArg + " --outbox-path " + outboxArg, 15000, out collected);
+        string collect = RunPython("host_agent\\collect_runtime_fact.py", "--profile " + Profile + " --host-id " + HostId() + " --audit-path " + auditArg + " --outbox-path " + outboxArg, 15000, out collected);
         if (!collected)
         {
+            hostAgentState = "采集失败";
+            hostAgentDetail = "本地审计事实未生成";
             Audit("host_fact_collect_blocked", collect.TrimStart());
             return;
         }
         bool delivered;
-        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --endpoint http://192.0.2.121:18666/api/v1/facts/ingest", 20000, out delivered);
+        string deliver = RunPython("host_agent\\deliver_fact_outbox.py", "--profile " + Profile + " --secret-file " + secretArg + " --outbox-path " + outboxArg + " --expected-host-id \"" + HostId() + "\" --endpoint \"" + ShadowCoordinatorEndpoint() + "\"", 20000, out delivered);
+        if (deliver.IndexOf("FACT_HOST_ID_MISMATCH", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            hostAgentState = "Fact Secret 不匹配";
+            hostAgentDetail = "Secret host_id 与本机 host_id 不一致";
+            Audit("host_fact_delivery_blocked", deliver.TrimStart());
+            return;
+        }
+        hostAgentState = delivered ? "事实投递正常" : "事实待重试";
+        hostAgentDetail = delivered ? "Outbox已确认" : "Outbox保留待补传";
         Audit(delivered ? "host_fact_delivery" : "host_fact_delivery_retry_pending", deliver.TrimStart());
     }
 
@@ -813,9 +1755,10 @@ internal static class BigQMTAccountTray
 
     private static void SimulationCycleIfDue(DateTime now, string today)
     {
-        // The master strategy switch must be on, it must be a weekday, and the
-        // wall clock must be inside the A-share continuous session window.
-        if (!StrategyPolicyEnabled()) return;
+        // The per-strategy run switch for the v1.1.15 simulator must be on, it
+        // must be a weekday, and the wall clock must be inside the A-share
+        // continuous session window.
+        if (!StrategyAutoRunEnabled(StrategyIdV1115)) return;
         if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday) return;
         if (now.Hour < 9 || (now.Hour == 9 && now.Minute < 35)) return;
         if (now.Hour > 14 || (now.Hour == 14 && now.Minute > 50)) return;
@@ -865,7 +1808,10 @@ internal static class BigQMTAccountTray
             || lower.IndexOf("connection") >= 0 || lower.IndexOf("refused") >= 0
             || lower.IndexOf("redis") >= 0 || lower.IndexOf("rpc") >= 0
             || lower.IndexOf("duplicate") >= 0 || lower.IndexOf("admission") >= 0
-            || lower.IndexOf("reconciliation") >= 0;
+            || lower.IndexOf("open orders") >= 0
+            || lower.IndexOf("reconciliation") >= 0
+            || lower.IndexOf("syntaxerror") >= 0
+            || lower.IndexOf("traceback") >= 0;
         if (retryable)
         {
             nextExecutionAttempt = now.AddMinutes(2);
@@ -943,5 +1889,133 @@ internal static class BigQMTAccountTray
         public readonly bool IsFirstInstance;
         public MutexHandle(string name) { inner = new System.Threading.Mutex(true, name, out IsFirstInstance); }
         public void Dispose() { if (IsFirstInstance) inner.ReleaseMutex(); inner.Dispose(); }
+    }
+
+    private sealed class UninstallSelectionForm : Form
+    {
+        private readonly ListBox list;
+        private readonly Label counter;
+        private readonly Label warning;
+        private readonly Button ok;
+        private string[] rows;
+        public UninstallSelectionForm(System.Collections.Generic.IList<string> rows)
+        {
+            this.rows = new string[rows.Count];
+            rows.CopyTo(this.rows, 0);
+            Text = "选择要删除的策略（点击行=选中/取消选中，可多选）";
+            FormBorderStyle = FormBorderStyle.Sizable;
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimizeBox = false; ShowInTaskbar = false;
+            ClientSize = new Size(760, 400);
+            Label hint = new Label();
+            hint.Text = "用鼠标点击行即可选中（高亮）或取消选中。可一次选多条。\n" +
+                        "点「删除选中」删除高亮的行；什么都不想删就点「取消」。";
+            hint.AutoSize = true;
+            hint.Location = new Point(12, 8);
+            list = new ListBox();
+            list.Location = new Point(12, 56);
+            list.Size = new Size(736, 280);
+            list.SelectionMode = SelectionMode.MultiSimple;
+            list.Font = new System.Drawing.Font("Consolas", 10F);
+            foreach (string row in rows) list.Items.Add(row);
+            // SelectedIndexChanged fires AFTER the selection changes (well
+            // behaved in .NET Framework 4, unlike CheckedListBox.ItemCheck).
+            list.SelectedIndexChanged += delegate { UpdateState(); };
+            counter = new Label();
+            counter.AutoSize = true;
+            counter.Location = new Point(12, 344);
+            counter.Text = "已选 0 / " + rows.Count + " 条";
+            warning = new Label();
+            warning.AutoSize = true;
+            warning.Location = new Point(12, 368);
+            warning.ForeColor = Color.FromArgb(170, 30, 30);
+            warning.Text = "⚠ 未选中任何策略。点行选中后再点「删除选中」";
+            Button all = new Button();
+            all.Text = "全选";
+            all.Location = new Point(12, 368);
+            all.AutoSize = true;
+            all.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetSelected(i, true); UpdateState(); };
+            Button none = new Button();
+            none.Text = "全不选";
+            none.Location = new Point(80, 368);
+            none.AutoSize = true;
+            none.Click += delegate { for (int i = 0; i < list.Items.Count; i++) list.SetSelected(i, false); UpdateState(); };
+            ok = new Button();
+            ok.Text = "删除选中";
+            ok.Location = new Point(540, 368);
+            ok.AutoSize = true;
+            ok.DialogResult = DialogResult.None; // no auto-close on click
+            ok.Click += ConfirmClick;
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(680, 368);
+            cancel.AutoSize = true;
+            cancel.DialogResult = DialogResult.Cancel;
+            AcceptButton = ok; CancelButton = cancel;
+            Controls.Add(hint); Controls.Add(list); Controls.Add(counter); Controls.Add(warning); Controls.Add(all); Controls.Add(none); Controls.Add(ok); Controls.Add(cancel);
+            UpdateState();
+        }
+
+        private void UpdateState()
+        {
+            int count = list.SelectedIndices.Count;
+            counter.Text = "已选 " + count + " / " + list.Items.Count + " 条";
+            warning.Text = count == 0 ? "⚠ 未选中任何策略。点行选中后再点「删除选中」" : "";
+            ok.Enabled = count > 0;
+        }
+
+        private void ConfirmClick(object sender, EventArgs e)
+        {
+            if (list.SelectedIndices.Count == 0)
+            {
+                UpdateState();
+                return;
+            }
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        public int[] SelectedIndicesCopy()
+        {
+            int[] copy = new int[list.SelectedIndices.Count];
+            list.SelectedIndices.CopyTo(copy, 0);
+            return copy;
+        }
+    }
+
+    private sealed class PasswordPromptForm : Form
+    {
+        private readonly TextBox input;
+        public PasswordPromptForm(string title, string label)
+        {
+            Text = title;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterScreen;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
+            ClientSize = new Size(360, 110);
+            Label prompt = new Label();
+            prompt.Text = label;
+            prompt.AutoSize = true;
+            prompt.Location = new Point(12, 12);
+            input = new TextBox();
+            input.Location = new Point(12, 40);
+            input.Width = 336;
+            input.UseSystemPasswordChar = true;
+            Button ok = new Button();
+            ok.Text = "确定";
+            ok.Location = new Point(212, 72);
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(286, 72);
+            cancel.DialogResult = DialogResult.Cancel;
+            AcceptButton = ok; CancelButton = cancel;
+            Controls.Add(prompt); Controls.Add(input); Controls.Add(ok); Controls.Add(cancel);
+        }
+        public bool EnteredPassword(out string password)
+        {
+            password = input.Text ?? "";
+            return password.Length > 0;
+        }
     }
 }

@@ -15,10 +15,16 @@ from kitling_bigqmt.tray_health import check_profile  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=("simulation", "production_readonly"), default="simulation")
-    parser.add_argument("--port", type=int, default=17890)
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="dashboard port; defaults to 17890 for simulation and 17891 for production_readonly",
+    )
     parser.add_argument("--attempts", type=int, default=2)
     args = parser.parse_args()
-    result = check_profile(ROOT, args.profile, args.port, attempts=max(1, min(args.attempts, 3)))
+    dashboard_port = args.port if args.port is not None else (17890 if args.profile == "simulation" else 17891)
+    result = check_profile(ROOT, args.profile, dashboard_port, attempts=max(1, min(args.attempts, 3)))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["overall"] in {"HEALTHY", "DEGRADED"} else 2
 

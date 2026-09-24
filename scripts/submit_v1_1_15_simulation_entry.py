@@ -1,4 +1,4 @@
-"""Submit exactly one preflighted v1.1.15 simulation entry, then re-lock.
+"""Submit exactly one preflighted v1.1.15 simulation entry.
 
 This is a migration/activation tool, not the long-running strategy executor.
 It accepts no account, code, quantity, or price arguments.  The only possible
@@ -24,6 +24,7 @@ from kitling_bigqmt.runtime_control import RuntimeControl  # noqa: E402
 from kitling_bigqmt.execution_admission import require_admission_for_root  # noqa: E402
 from kitling_bigqmt.machine_config import load_gateway  # noqa: E402
 from kitling_bigqmt.simulation_execution import ACCOUNT_ID, STRATEGY_ID, build_order_plan  # noqa: E402
+from kitling_bigqmt.simulation_cycle import live_broker_orders  # noqa: E402
 from kitling_bigqmt.sleeve_accounting import SleeveAccounting  # noqa: E402
 from kitling_bigqmt.state_store import RuntimeStateStore  # noqa: E402
 
@@ -74,7 +75,7 @@ def main() -> int:
     tick = client.full_tick([target])
     if not asset.get("ok"):
         raise SystemExit("blocked: account preflight failed")
-    if list(orders.get("data") or []):
+    if live_broker_orders(list(orders.get("data") or [])):
         raise SystemExit("blocked: account has open orders")
     if (positions.get("data") or {}).get(target):
         raise SystemExit("blocked: target already exists in broker account and cannot be claimed as a new sleeve")
@@ -89,7 +90,9 @@ def main() -> int:
     evidence = {
         "kind": "v1_1_15_simulation_entry_activation", "created_at": datetime.now().astimezone().isoformat(),
         "account_id": ACCOUNT_ID, "strategy_id": STRATEGY_ID, "signal_day": event.get("signal_day"),
-        "plan": plan, "ping": ping.get("data"), "open_order_count": len(orders.get("data") or []),
+        "plan": plan, "ping": ping.get("data"),
+        "order_count": len(orders.get("data") or []),
+        "open_order_count": len(live_broker_orders(list(orders.get("data") or []))),
         "target_preexisting_position": False, "execution_requested": bool(args.execute),
     }
     if not args.execute:
@@ -97,25 +100,21 @@ def main() -> int:
         return 0
     control = RuntimeControl(ROOT / "runtime_data" / "control" / "simulation" / "runtime_control.json")
     response = None
-    try:
-        control.arm_simulation_strategy(
-            account_id=ACCOUNT_ID, strategy_id=STRATEGY_ID,
-            approval_scope="2026-09-11 explicit user-authorized v1.1.15 simulation entry activation",
-            valid_for_seconds=120,
-        )
-        evidence["execution_admission"] = require_admission_for_root(
-            ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
-        )
-        signal_id = "v1_1_15-entry-%s-%s" % (event["signal_day"], uuid.uuid4().hex[:10])
-        response = rpc_submit(redis, {
-            "account_id": ACCOUNT_ID, "action": "BUY", "stock_code": plan["stock_code"],
-            "volume": int(plan["quantity"]), "price": float(plan["limit_price"]), "price_type": "LIMIT",
-            "strategy_name": STRATEGY_ID, "signal_id": signal_id, "remark": signal_id,
-        })
-        evidence["response"] = response
-        evidence["no_retry_on_timeout"] = True
-    finally:
-        control.lock_orders("v1.1.15 simulation entry response received or timed out; reconcile before another order")
+    control.enable_simulation_strategy(
+        account_id=ACCOUNT_ID, strategy_id=STRATEGY_ID,
+        approval_scope="2026-09-11 explicit user-authorized v1.1.15 simulation entry activation",
+    )
+    evidence["execution_admission"] = require_admission_for_root(
+        ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
+    )
+    signal_id = "v1_1_15-entry-%s-%s" % (event["signal_day"], uuid.uuid4().hex[:10])
+    response = rpc_submit(redis, {
+        "account_id": ACCOUNT_ID, "action": "BUY", "stock_code": plan["stock_code"],
+        "volume": int(plan["quantity"]), "price": float(plan["limit_price"]), "price_type": "LIMIT",
+        "strategy_name": STRATEGY_ID, "signal_id": signal_id, "remark": signal_id,
+    })
+    evidence["response"] = response
+    evidence["no_retry_on_timeout"] = True
     directory = ROOT / "runtime_data" / "evidence" / "simulation" / "strategy_execution"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("v1_1_15_entry_%s.json" % datetime.now().strftime("%Y%m%d_%H%M%S"))

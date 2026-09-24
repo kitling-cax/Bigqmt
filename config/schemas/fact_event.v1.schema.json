@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigqmt://schemas/fact_event.v1",
+  "title": "BigQMT idempotent host fact event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "host_id", "occurred_at", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "format": "uuid"},
+    "event_type": {"enum": ["HOST_HEARTBEAT", "STRATEGY_RUNTIME", "ORDER", "TRADE", "POSITION", "NAV", "CHECKPOINT", "DEPLOYMENT"]},
+    "host_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "strategy_account_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "strategy_instance_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "payload": {"type": "object"}
+  }
+}

@@ -13,6 +13,7 @@ import queue as _queue
 from collections import OrderedDict as _OrderedDict
 import threading
 import importlib
+import warnings
 import datetime as _dt
 from typing import Any, Dict, Iterable, List, Optional
 # Only these three are used below, but every public constant is re-exported
@@ -27,9 +28,11 @@ from xtquant import xtconstant as _xtconstant
 from xtquant.xtconstant import ORDER_UNKNOWN, STOCK_BUY, STOCK_SELL
 from xtquant.xttype import StockAccount
 
+from .code_utils import is_bond_code
 from .full_tick_cache import request_full_tick_cache, wait_full_tick_cache
 from .local_cache import LocalMarketCache
 from .order_id import OrderId, order_sys_id_of
+from .option_order_type import option_order_type
 from .redis_rpc import TYPED_PAYLOAD_FLAG, call_redis_rpc
 from .logging_setup import get_logger
 
@@ -56,8 +59,10 @@ del _const_name
 # ``openInterest`` for K-lines.  Cache fills deliberately use a bounded subset
 # instead, but omitting those two standard fields leaves the resulting frame
 # observably incompatible with MiniQMT consumers.
+# preClose: 下游策略(涨停解析/prepare_data等)按 MiniQMT 口径取 preClose 算涨跌幅, 缺列即 KeyError
 DEFAULT_DOWNLOAD_FIELDS = [
     "time", "open", "high", "low", "close", "volume", "amount", "openInterest",
+    "preClose",
 ]
 # Codes per get_market_data_ex request. One request carries a single RPC timeout,
 # so a wide stock_list either fits or loses everything (issue #47).
@@ -91,6 +96,50 @@ class CompatObject:
     def __repr__(self):
         items = ", ".join("%s=%r" % (key, value) for key, value in sorted(self.__dict__.items()))
         return "%s(%s)" % (self.__class__.__name__, items)
+
+
+class CompatRow(dict):
+    """A dict that also answers attribute access, keys untouched.
+
+    MiniQMT's *sync* queries hand back the terminal's own objects. Only the
+    push path builds an xttype object -- ``on_push_AccountStatus`` is the one
+    place ``xttrader`` reads ``m_nStatus`` and converts it -- while every
+    ``query_*`` returns ``common_op_sync_with_seq``'s result unchanged, so the
+    account family arrives with m_ prefixed attributes on it.
+
+    The bridge relayed the right names in the wrong container: a dict, where
+    ``.m_nStatus`` raises AttributeError and only ``["m_nStatus"]`` works.
+    Subclassing dict adds the attribute path without taking the subscript one
+    away, so callers written against today's behaviour keep working, and so
+    does anything that json-encodes the row or checks ``isinstance(.., dict)``.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+
+def _as_compat_row(row):
+    """Wrap a native-field dict for attribute access; pass anything else through."""
+    return CompatRow(row) if isinstance(row, dict) else row
+
+
+def _market_of(stock_code):
+    """``XtCancelError.market`` -- xtconstant SH_MARKET (0) / SZ_MARKET (1).
+
+    The code's suffix is the only source the bridge has, and the cancel paths
+    often carry no code at all. -1 there says "not known" rather than letting
+    an absent value impersonate 上海, which is what defaulting to 0 would do.
+    """
+    suffix = str(stock_code or "").rsplit(".", 1)[-1].upper()
+    if suffix == "SH":
+        return 0
+    if suffix == "SZ":
+        return 1
+    return -1
+
 
 
 
@@ -151,6 +200,48 @@ def _bool_value(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _first_set(*values):
+    """The first value that is not None; None if all are."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+class _ClientSetting(object):
+    """One client feature setting: explicit ``redis_config`` first, then the
+    config module's section, then the environment / built-in default -- the
+    order the constructor already promises for host/port/password.
+
+    Issue #289: the three feature blocks each broke that in its own way.
+    ``local_cache`` read the module section first and used the explicit value
+    only as its ``.get`` fallback; ``formula_server`` ``or``-chained the module
+    section ahead of the explicit dict, so any module section discarded the
+    explicit one outright; ``full_tick`` never read ``redis_config`` at all,
+    so its constructor switch did nothing even with no module present.
+
+    ``section`` is what load_client_config hands over: the module's dedicated
+    dict (``BIGQMT_LOCAL_CACHE_CONFIG`` etc.) with the module's own
+    ``BIGQMT_REDIS_CONFIG`` flat keys already folded in. How those two rank
+    against each other inside one file is that function's business and is
+    unchanged here. Flat keys carry the section prefix
+    (``local_cache_enabled``), section keys drop it (``enabled``); a section
+    may also spell the flat key, which the old code accepted, so both are
+    looked up there.
+    """
+
+    def __init__(self, explicit, section):
+        self.explicit = dict(explicit or {})
+        self.section = dict(section or {})
+
+    def get(self, flat_key, section_key):
+        return _first_set(
+            self.explicit.get(flat_key),
+            self.section.get(section_key),
+            self.section.get(flat_key),
+        )
+
+
 def _import_optional_module(module_name):
     try:
         return importlib.import_module(module_name)
@@ -199,6 +290,25 @@ def _quote_push_zmq_address(client):
     port = zmq_config.get("port")
     base_port = int(port) if port is not None else _default_zmq_port(client.account_id)
     return "tcp://%s:%d" % (host, base_port + 1)
+
+
+def _build_quote_push_channel(client):
+    """Build the push-channel subscriber matching the RPC transport: redis
+    deployments derive the channel locally; zmq deployments connect to the
+    server PUB socket (host from zmq config, RPC port + 1).
+
+    Module-level on purpose: BigQmtXtTrader's exec-event listener needs it too,
+    and when it lived only on BigQmtXtData the trader's call raised
+    AttributeError into a silent retry loop — zmq deployments never got a
+    single exec callback (#366, broken since #76).
+    """
+    from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+
+    transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
+    if transport_name in ("zmq",):
+        address = _quote_push_zmq_address(client)
+        return ZmqQuotePushChannel(connect_address=address)
+    return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
 
 
 def _missing_account_id_message():
@@ -294,6 +404,27 @@ def load_client_config(module_name=None):
     return {}
 
 
+def _account_type_param(account):
+    """The type name a StockAccount declares, "" for a bare id string.
+
+    Sent as the ``account_type`` param of every trade RPC (港股通 on a stock
+    account: StockAccount(id, "HUGANGTONG") reads the HUGANGTONG book). The
+    server honours it only when the account is configured for that type,
+    otherwise the deployment's own type answers, as always (#92).
+    """
+    if account is None or isinstance(account, (str, dict)):
+        return ""
+    return _account_type_name(getattr(account, "account_type", None))
+
+
+def _with_account_type(params, account):
+    """``params`` plus the account's declared type, when it declares one."""
+    name = _account_type_param(account)
+    if name:
+        params["account_type"] = name
+    return params
+
+
 def _account_id(account, fallback=""):
     if account is None:
         return str(fallback or "")
@@ -360,6 +491,96 @@ def _as_list(value):
     return [value]
 
 
+# Big QMT m_nOpType -> MiniQMT order_type for the credit family (#330). 27-32
+# are the same number in both; big QMT's 33/34 (担保品买入/卖出) are MiniQMT's
+# CREDIT_BUY/CREDIT_SELL (23/24); the 专项 family is 70-75 there, 40-45 here.
+# 80-83 (可转债转股/回售) have no MiniQMT constant and pass through.
+_CREDIT_ORDER_TYPE_BY_OP = {
+    27: 27, 28: 28, 29: 29, 30: 30, 31: 31, 32: 32,
+    33: 23, 34: 24,
+    70: 40, 71: 41, 72: 42, 73: 43, 74: 44, 75: 45,
+    80: 80, 81: 81, 82: 82, 83: 83,
+}
+
+
+def _credit_order_type_from_op(op_type, fallback):
+    """The MiniQMT order_type for a row's native opType, else ``fallback``.
+
+    query_stock_orders used to derive order_type from BUY/SELL alone, so a
+    融资买入 (opType 27) read as STOCK_BUY 23 (#330). Only the credit and
+    convertible families are mapped; ordinary 23/24 and the futures/option
+    numbers keep whatever the side-based logic decided.
+    """
+    try:
+        value = int(op_type)
+    except (TypeError, ValueError):
+        return fallback
+    return _CREDIT_ORDER_TYPE_BY_OP.get(value, fallback)
+
+
+# enum_EEntrustTypes（迅投知识库）: 54 融资委托 / 55 融券委托 / 57 信用普通委托。
+# reporter 实盘数据（#330, 2026-09-23）: 融资买入 m_eEntrustType=54、担保品
+# 买入=57，而 m_nOpType 两者没有区别——0.3.52 按 m_nOpType 的判据因此
+# 对这批终端永不生效。m_eEntrustType + 开平方向才是可靠判据。
+_CREDIT_ORDER_TYPE_BY_ENTRUST = {
+    # (entrust_type, is_buy) -> MiniQMT order_type
+    (54, True): 27,    # 融资委托 + 买 = 融资买入 CREDIT_FIN_BUY
+    (54, False): 31,   # 融资委托 + 卖 = 卖券还款 CREDIT_SELL_SECU_REPAY
+    (55, True): 29,    # 融券委托 + 买 = 买券还券 CREDIT_BUY_SECU_REPAY
+    (55, False): 28,   # 融券委托 + 卖 = 融券卖出 CREDIT_SLO_SELL
+    (57, True): 23,    # 信用普通委托 + 买 = 担保品买入 CREDIT_BUY
+    (57, False): 24,   # 信用普通委托 + 卖 = 担保品卖出 CREDIT_SELL
+}
+
+# 「专项」名称只从 m_strOptName 拿（entrust 枚举不分专项）。
+_CREDIT_SPECIAL_UPGRADE = {27: 40, 28: 41, 29: 42, 31: 44, 32: 45}
+
+
+def _credit_order_type_from_entrust(entrust_type, offset_flag, opt_name, fallback):
+    """The MiniQMT order_type from m_eEntrustType + side, else ``fallback``.
+
+    ``opt_name`` 含「专项」时升级到专项族（40-45）；56 信用平仓等未列出的
+    类别回退给调用方的下一个判据。
+    """
+    try:
+        entrust = int(entrust_type)
+    except (TypeError, ValueError):
+        return fallback
+    try:
+        side = int(offset_flag)
+    except (TypeError, ValueError):
+        return fallback
+    if side == 48:
+        is_buy = True
+    elif side == 49:
+        is_buy = False
+    else:
+        return fallback
+    mapped = _CREDIT_ORDER_TYPE_BY_ENTRUST.get((entrust, is_buy))
+    if mapped is None:
+        return fallback
+    if "专项" in str(opt_name or ""):
+        mapped = _CREDIT_SPECIAL_UPGRADE.get(mapped, mapped)
+    return mapped
+
+
+def _credit_order_type_for_row(item, fallback):
+    """Credit order_type for a snapshot dict: entrust first, op second (#330).
+
+    0.3.55+ 的服务端在快照里带 m_eEntrustType；老服务端/老终端没有它时
+    退回 0.3.52 的 m_nOpType 映射，再不行才用方向推的 23/24。
+    """
+    order_type = _credit_order_type_from_entrust(
+        item.get("entrust_type"),
+        item.get("offset_flag", item.get("direction")),
+        item.get("opt_name"),
+        None)
+    if order_type is not None:
+        return order_type
+    return _credit_order_type_from_op(item.get("op_type"), fallback)
+
+
+
 def _account_type_name(value):
     """The NAME of an account type, whatever form it arrives in.
 
@@ -424,6 +645,71 @@ def _account_type_code(value):
     return 0
 
 
+#: Where a server-side "this answer is degraded" marker lands on the rebuilt
+#: frame. ``DataFrame.attrs`` is pandas >= 1.0; on anything older the marker is
+#: simply dropped, which is why nothing downstream may depend on it existing.
+PARTIAL_MARKER_ATTR = "bigqmt_partial"
+
+#: Reasons already warned about, so a polling caller is told once rather than
+#: once per bar pull (#139 is what unthrottled per-call logging costs).
+_partial_warned = set()
+
+
+def _attach_partial_marker(frame, marker):
+    if not isinstance(marker, dict):
+        return frame
+    try:
+        frame.attrs[PARTIAL_MARKER_ATTR] = dict(marker)
+    except Exception:
+        pass
+    return frame
+
+
+def _partial_marker(frame):
+    """The server's degraded-answer marker on a frame, or None."""
+    try:
+        marker = frame.attrs.get(PARTIAL_MARKER_ATTR)
+    except Exception:
+        return None
+    return marker if isinstance(marker, dict) else None
+
+
+def _warn_partial_market_data(markers):
+    """Say once per distinct degradation that the answer is not the full one.
+
+    The server logs this too, but the server's log is on the trading machine
+    and the caller is not reading it -- and the whole failure mode #237 is
+    about is an answer that looks complete and is not.
+    """
+    for marker in markers:
+        if not isinstance(marker, dict):
+            continue
+        key = (
+            str(marker.get("reason") or ""),
+            str(marker.get("period") or ""),
+            str(marker.get("source") or ""),
+            ",".join(str(name) for name in (marker.get("missing") or [])),
+            bool(marker.get("fill_data_dropped")),
+        )
+        if key in _partial_warned:
+            continue
+        _partial_warned.add(key)
+        message = (
+            "bigqmt: %s bars for period=%s were served by %s, not the usual "
+            "path: columns served %s%s%s. See DataFrame.attrs[%r]."
+            % (marker.get("reason") or "partial",
+               marker.get("period") or "?",
+               marker.get("source") or "?",
+               ",".join(str(name) for name in (marker.get("served") or [])) or "-",
+               ("; MISSING %s" % ",".join(str(n) for n in marker["missing"]))
+               if marker.get("missing") else "",
+               "; fill_data did not reach the terminal"
+               if marker.get("fill_data_dropped") else "",
+               PARTIAL_MARKER_ATTR))
+        warnings.warn(message, stacklevel=2)
+        log.warning("%s", message)
+
+
 def _restore_jsonable(value):
     if isinstance(value, dict):
         marker = value.get("__bigqmt_type__")
@@ -431,9 +717,17 @@ def _restore_jsonable(value):
             try:
                 import pandas as pd
 
-                return pd.DataFrame(value.get("records") or [], columns=value.get("columns") or None)
+                frame = pd.DataFrame(value.get("records") or [],
+                                     columns=value.get("columns") or None)
             except Exception:
                 return value.get("records") or []
+            # #237: the server marks an answer that is not the one that was
+            # asked for -- fewer columns, a dropped argument, a different
+            # servant. Carry it onto the frame so a caller can see it without
+            # reading the terminal's log. An answer without the key rebuilds
+            # exactly as before, so an old server and a new client agree.
+            _attach_partial_marker(frame, value.get("__bigqmt_partial__"))
+            return frame
         if marker == "Panel":
             # pandas dropped Panel in 1.0, so a 3-D object cannot be rebuilt on
             # a modern client. It comes back as what a caller can actually use:
@@ -452,6 +746,157 @@ def _restore_jsonable(value):
     if isinstance(value, list):
         return [_restore_jsonable(item) for item in value]
     return value
+
+
+_KNOWN_BAR_FIELDS = {
+    "time", "open", "high", "low", "close", "volume", "amount",
+    "settle", "openInterest", "preClose", "suspendFlag",
+}
+
+
+def _to_documented_market_data_shape(data, field_list, stock_list, period):
+    """MiniQMT's documented get_market_data contract for bar periods:
+    ``dict[field] -> pd.DataFrame(index=stock_list, columns=time_list)``.
+
+    Big QMT hands back a bare long DataFrame for one stock and
+    ``dict[stock] -> long DataFrame`` for many -- both off-contract (the
+    reporter's printout, 2026-09-10). Pivot here, client-side: the server
+    keeps the long shape, so raw-RPC callers and the all-zero heal path are
+    untouched, and no QMT-side deploy is needed.
+
+    Already-documented answers (keys are field names) and anything not a
+    per-stock long frame (tick period, empty, scalars) pass through.
+    """
+    if str(period or "").lower() == "tick":
+        return data
+    try:
+        import pandas as pd
+    except Exception:
+        return data
+
+    if hasattr(data, "columns"):
+        # Bare frame: one stock, no dict wrapper.
+        code = str((_as_list(stock_list) or [""])[0])
+        per_stock = {code: data}
+    elif isinstance(data, dict) and data:
+        keys = [str(k) for k in data.keys()]
+        if all(k in _KNOWN_BAR_FIELDS for k in keys):
+            return data  # already the documented {field: wide frame}
+        per_stock = data
+    else:
+        return data
+
+    fields = [str(f) for f in (field_list or []) if str(f) != "time"]
+    wide = {}
+    for code, frame in per_stock.items():
+        # pandas Index raises on truthiness -- no `or []` here.
+        _cols = getattr(frame, "columns", None)
+        columns = list(_cols) if _cols is not None else []
+        if not columns:
+            continue
+        # RPC path long frames carry 'index'; FormulaServer-built frames carry
+        # 'stime'. Both are the time axis.
+        time_col = next(
+            (c for c in ("time", "index", "stime") if c in columns), None)
+        if time_col is None:
+            return data  # not a long bar frame -- pass through untouched
+        wanted = fields or [c for c in columns if c != time_col]
+        for field in wanted:
+            if field not in columns:
+                continue
+            wide.setdefault(field, {})[code] = frame.set_index(time_col)[field]
+    if not wide:
+        return data
+    out = {field: pd.DataFrame(series).T for field, series in wide.items()}
+    # MiniQMT's time_list is STRINGS ('20260901', dtype='str' -- verified by
+    # printing data['open'].columns on a live miniQMT, not by the bare
+    # printout, which shows no quotes either way). Normalize every label to
+    # str so the frame matches miniQMT's dtype.
+    for frame in out.values():
+        frame.columns = [str(c) for c in frame.columns]
+    return out
+
+
+# xtdata.get_divid_factors 的七个权息列（dict.thinktrader.net「除权数据」一节），
+# 顺序就是大 QMT 原生返回里那个 7 元素列表的位置顺序：
+#   dict{毫秒时间戳: [每股红利, 每股送转, 每转赠, 配股, 配股价, 是否股改, 复权系数]}
+DIVID_FACTOR_COLUMNS = ("interest", "stockBonus", "stockGift",
+                        "allotNum", "allotPrice", "gugai", "dr")
+# 官方 frame 的完整列：time（毫秒时间戳）在前，然后是七个权息列，全部 float64。
+DIVID_FRAME_COLUMNS = ("time",) + DIVID_FACTOR_COLUMNS
+
+# 大 QMT 给的除权日毫秒戳是上海时间零点（实测三个样本 (ms/1000 + 8h) % 86400 == 0）。
+# 用固定 +8h 折成 YYYYMMDD，不依赖客户端机器的时区。
+_SHANGHAI_OFFSET_S = 8 * 3600
+
+
+def _divid_day_key(key):
+    """A big-QMT ms timestamp key -> the YYYYMMDD string xtdata indexes by.
+
+    Already-YYYYMMDD keys (8 digits) pass through; anything that is not a
+    plain number is left alone rather than guessed at.
+    """
+    import datetime as _dt
+
+    text = str(key).strip()
+    if len(text) == 8 and text.isdigit():
+        return text
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    seconds = number / 1000.0 if number > 1e11 else number
+    day = _dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=seconds + _SHANGHAI_OFFSET_S)
+    return day.strftime("%Y%m%d")
+
+
+def _divid_factors_frame(data):
+    """``dict{ms: [7 values]}`` -> the DataFrame ``xtdata.get_divid_factors`` returns.
+
+    Measured against the real xtdata (``df.info()`` on a live miniQMT):
+
+        Index: 19990823 to 20080707            <- ex-dividend day, YYYYMMDD
+        time, interest, stockBonus, stockGift,
+        allotNum, allotPrice, gugai, dr        <- 8 columns, all float64
+
+    The wire carries big QMT's native shape -- a dict keyed by the day's ms
+    timestamp with a positional 7-list -- so this adds the day index, the
+    ``time`` column (the ms key, as float), the names, and the float64 dtype,
+    the way ``get_market_data_ex`` turns wire records into frames. Passing the
+    dict through as-is made ``df["dr"]`` a KeyError for every caller written
+    against the real xtdata.
+
+    Rows keep the server's order (chronological from the terminal). A value
+    that already comes as a named dict is read by name. Anything that is not
+    a dict passes through untouched, so an error envelope is not turned into
+    an empty frame.
+    """
+    if not isinstance(data, dict):
+        return data
+    import pandas as pd
+
+    columns = list(DIVID_FRAME_COLUMNS)
+    if not data:
+        return pd.DataFrame(columns=columns, dtype="float64")
+    rows = {}
+    for key, value in data.items():
+        try:
+            time_ms = float(key)
+        except (TypeError, ValueError):
+            time_ms = float("nan")
+        if isinstance(value, dict):
+            if value.get("time") is not None:
+                try:
+                    time_ms = float(value["time"])
+                except (TypeError, ValueError):
+                    pass
+            factors = [value.get(name) for name in DIVID_FACTOR_COLUMNS]
+        else:
+            seq = list(value) if isinstance(value, (list, tuple)) else [value]
+            factors = (seq + [None] * len(DIVID_FACTOR_COLUMNS))[:len(DIVID_FACTOR_COLUMNS)]
+        rows[_divid_day_key(key)] = [time_ms] + factors
+    frame = pd.DataFrame.from_dict(rows, orient="index", columns=columns)
+    return frame.astype("float64")
 
 
 def _digits_only(value):
@@ -551,6 +996,34 @@ def _qmt_stime_index(value):
     return str(value or "")
 
 
+_EPOCH_PLACEHOLDER_FLOOR = "19900101"
+
+
+def _is_epoch_placeholder_label(value):
+    """True for a bar label that predates the A-share market itself (#228).
+
+    Asked for a window it has no data for, big QMT does not answer with zero
+    rows -- it answers with one row stamped at the epoch (`stime` `19700101`,
+    OHLC and volume all zero). miniQMT returns an empty frame there, and that
+    is the contract this bridge promises.
+
+    The row is not harmless: a caller walking rows to derive period boundaries
+    reads it as a real bar and asks the calendar for `1969-12-29~1970-01-04`.
+    One downstream instance died on exactly that at 09:11 pre-open and idled
+    until someone stopped it, having already persisted `bar_time=1970-01-01`
+    rows that needed cleaning by hand.
+
+    The floor is the market's own start, not a tuning knob: the Shanghai
+    exchange opened in December 1990, so nothing earlier can be a real bar. A
+    zero row on a *plausible* date is left alone -- a suspended day is
+    legitimately zero-volume, and `fill_data=True` fills gaps on purpose.
+    """
+    digits = _digits_only(value)
+    if len(digits) < 8:
+        return False
+    return digits[:8] < _EPOCH_PLACEHOLDER_FLOOR
+
+
 def _iso_week_start_label(value):
     """The Monday of the ISO week a ``1w`` bar label belongs to, as YYYYMMDD.
 
@@ -568,6 +1041,66 @@ def _iso_week_start_label(value):
         return None
     day = parsed.date()
     return (day - _dt.timedelta(days=day.weekday())).strftime("%Y%m%d")
+
+
+def _month_start_label(value):
+    """The 1st of the month a bar label belongs to, as YYYYMMDD."""
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    return parsed.strftime("%Y%m") + "01"
+
+
+def _quarter_start_label(value):
+    """The 1st of the quarter's first month a bar label belongs to."""
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    month = ((parsed.month - 1) // 3) * 3 + 1
+    return "%04d%02d01" % (parsed.year, month)
+
+
+def _halfyear_start_label(value):
+    """Jan 1 or Jul 1 of the half-year a bar label belongs to."""
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    return "%04d0101" % parsed.year if parsed.month <= 6 else "%04d0701" % parsed.year
+
+
+def _year_start_label(value):
+    """Jan 1 of the year a bar label belongs to."""
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    return "%04d0101" % parsed.year
+
+
+def _period_end_label(period, value):
+    """The last calendar day of the natural period a bar label belongs to.
+
+    Used only to tell an in-progress bar (its period is not over yet) from a
+    finalized one. Returns None for anything unparseable.
+    """
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    day = parsed.date()
+    if period == "1w":
+        return (day - _dt.timedelta(days=day.weekday()) + _dt.timedelta(days=6)).strftime("%Y%m%d")
+    if period == "1mon":
+        year, month = parsed.year, parsed.month
+        end = _dt.date(year + month // 12, month % 12 + 1, 1) - _dt.timedelta(days=1)
+        return end.strftime("%Y%m%d")
+    if period == "1q":
+        month = ((parsed.month - 1) // 3) * 3 + 3
+        end = _dt.date(parsed.year + month // 12, month % 12 + 1, 1) - _dt.timedelta(days=1)
+        return end.strftime("%Y%m%d")
+    if period == "1hy":
+        return "%04d0630" % parsed.year if parsed.month <= 6 else "%04d1231" % parsed.year
+    if period == "1y":
+        return "%04d1231" % parsed.year
+    return None
 
 
 def _bar_float(value):
@@ -627,6 +1160,15 @@ def _normalize_market_data_frame(df, field_list=None):
                 _qmt_datetime_to_epoch_ms(parsed) if parsed is not None else None
                 for parsed in (_parse_qmt_stime(value) for value in stimes)
             ]
+        # Drop big QMT's "no data for this window" placeholders (#228). Done
+        # after the derived columns are built, and by position, so the rows
+        # that stay keep the values that belong to them.
+        keep = [
+            position for position, value in enumerate(stimes)
+            if not _is_epoch_placeholder_label(value)
+        ]
+        if len(keep) != len(stimes):
+            out = out.iloc[keep]
         if requested:
             keep = [field for field in requested if field in out.columns]
             if keep:
@@ -638,11 +1180,98 @@ def _normalize_market_data_frame(df, field_list=None):
         return df
 
 
-def _normalize_market_data_result(data, field_list=None):
+def _ensure_preclose_from_lag(df, field_list=None, period=None):
+    """preClose 行级兜底: 该列缺失/为0 且当日 close 有效时, 用前收 lag 补。
+
+    big QMT 对正常股票返回真实 preClose; 但 (a) 早期本地缓存文件缺该列,
+    (b) 个别行可能为0。除权除息日 lag(前收) 与官方 preClose 略有偏差, 可接受。
+
+    两条边界（第一版没有，打红了 11 个测试）：
+
+    * **只在调用方要了这列时才补列**——``field_list`` 为空是 MiniQMT 的
+      「全字段」，含 preClose；显式给了 ``field_list`` 且没点 preClose 的，
+      返回列要和 MiniQMT 一样只有点名的那些，不能多出一列。
+    * **有精确来源的周期不用 lag 填 0**：``1w`` 的 preClose 终端恒为 0，
+      ``_backfill_pre_close`` 按日线取周首日的真实前收（#166），除权在周首日
+      时 lag 是错的；lag 先把 0 盖掉，回填就再也看不到「缺」了。回填关掉或
+      没有日线时留 0——沉默的错价比 0 更糟，#166 的测试就是这么钉的。
+    """
+    try:
+        if not hasattr(df, "columns") or "close" not in df.columns:
+            return df
+        requested = [str(f) for f in (field_list or [])]
+        wants_column = not requested or "preClose" in requested
+        close = df["close"]
+        valid_close = close.notna() & (close > 0)
+        lag = close.shift(1)
+        fill = lag.where(lag.notna() & (lag > 0), close)
+        if "preClose" not in df.columns:
+            if not wants_column:
+                return df
+            # 停牌/无数据帧也保证列存在(填0), 与 MiniQMT 行为一致, 避免下游 KeyError
+            out = df.copy()
+            out["preClose"] = fill.where(valid_close, 0)
+            return out
+        if str(period or "") in PRE_CLOSE_BACKFILL_PERIODS:
+            return df
+        if not bool(valid_close.any()):
+            return df
+        bad = (df["preClose"].isna() | (df["preClose"] == 0)) & valid_close
+        if not bool(bad.any()):
+            return df
+        out = df.copy()
+        out.loc[bad, "preClose"] = fill[bad]
+        return out
+    except Exception:
+        return df
+
+
+def _ensure_suspend_flag_column(df, field_list=None):
+    """suspendFlag 列形状兜底: 空 field_list(=全字段)或点名时, 缺列则补 0。
+
+    合成回落帧(``synth_period_primary_empty``, #237)的 servant
+    (ContextInfo.get_market_data)只服务 OHLCV+amount 六列, 实测把
+    suspendFlag 混进请求会让整个请求 0 行, 所以服务端给不出这列——
+    MiniQMT 的同请求却带全部 11 列。下游按 MiniQMT 习惯读
+    ``df["suspendFlag"]`` 会 KeyError; 自己 concat 补列会拿到 NaN,
+    对它做整数转换直接 ValueError。
+
+    与 ``_ensure_preclose_from_lag`` 的缺列分支同一条边界: 只在调用方
+    要了这列(field_list 为空或点了 suspendFlag)时补列, 显式点名清单
+    不多出列。值填 0 与该函数对停牌/无数据帧的处理一致(避免下游
+    KeyError); 注意 0 是形状契约的默认值, 不是合成周期的真实停牌
+    标志——真值需要按日线聚合(suspendFlag 在日线 RPC 有真值), 可作
+    后续增强, 同 preClose 的 #166 精确回填之于 lag 的关系。
+    """
+    try:
+        if not hasattr(df, "columns"):
+            return df
+        if "suspendFlag" in df.columns:
+            return df
+        requested = [str(f) for f in (field_list or [])]
+        if requested and "suspendFlag" not in requested:
+            return df
+        out = df.copy()
+        out["suspendFlag"] = 0
+        return out
+    except Exception:
+        return df
+
+
+def _ensure_kline_columns(df, field_list=None, period=None):
+    """K 线可选列的形状兜底组合: preClose(lag) 之后补 suspendFlag。"""
+    return _ensure_suspend_flag_column(
+        _ensure_preclose_from_lag(df, field_list=field_list, period=period),
+        field_list=field_list)
+
+
+def _normalize_market_data_result(data, field_list=None, period=None):
     if not isinstance(data, dict):
-        return data
+        return _ensure_kline_columns(data, field_list=field_list, period=period)
     return {
-        code: _normalize_market_data_frame(frame, field_list=field_list)
+        code: _ensure_kline_columns(
+            _normalize_market_data_frame(frame, field_list=field_list),
+            field_list=field_list, period=period)
         for code, frame in data.items()
     }
 
@@ -738,57 +1367,50 @@ class BigQmtRpcClient:
             if config_download_poll is not None
             else _env_float("BIGQMT_DOWNLOAD_POLL_INTERVAL_SECONDS", 0.5)
         )
-        full_tick_cache_config = dict(client_config.get("full_tick_cache_config") or {})
+        # Precedence for the three feature sections below (#289): explicit
+        # redis_config > config module > env / default -- the order
+        # host/port/password already get above.
+        full_tick = _ClientSetting(redis_config, client_config.get("full_tick_cache_config"))
         self.full_tick_cache_config = {
             "enabled": _bool_value(
-                full_tick_cache_config.get("enabled", full_tick_cache_config.get("full_tick_cache_enabled")),
+                full_tick.get("full_tick_cache_enabled", "enabled"),
                 _env_bool("BIGQMT_FULL_TICK_CACHE_ENABLED", False),
             ),
-            "demand_ttl_seconds": float(
-                full_tick_cache_config.get("demand_ttl_seconds")
-                or full_tick_cache_config.get("full_tick_demand_ttl_seconds")
-                or _env_float("BIGQMT_FULL_TICK_DEMAND_TTL_SECONDS", 10.0)
-            ),
-            "cache_ttl_seconds": float(
-                full_tick_cache_config.get("cache_ttl_seconds")
-                or full_tick_cache_config.get("full_tick_cache_ttl_seconds")
-                or _env_float("BIGQMT_FULL_TICK_CACHE_TTL_SECONDS", 10.0)
-            ),
-            "wait_seconds": float(
-                full_tick_cache_config.get("wait_seconds")
-                or full_tick_cache_config.get("full_tick_wait_seconds")
-                or _env_float("BIGQMT_FULL_TICK_WAIT_SECONDS", 3.5)
-            ),
-            "poll_interval_seconds": float(
-                full_tick_cache_config.get("poll_interval_seconds")
-                or full_tick_cache_config.get("full_tick_poll_interval_seconds")
-                or _env_float("BIGQMT_FULL_TICK_POLL_INTERVAL_SECONDS", 0.2)
-            ),
+            "demand_ttl_seconds": float(_first_set(
+                full_tick.get("full_tick_demand_ttl_seconds", "demand_ttl_seconds"),
+                _env_float("BIGQMT_FULL_TICK_DEMAND_TTL_SECONDS", 10.0))),
+            "cache_ttl_seconds": float(_first_set(
+                full_tick.get("full_tick_cache_ttl_seconds", "cache_ttl_seconds"),
+                _env_float("BIGQMT_FULL_TICK_CACHE_TTL_SECONDS", 10.0))),
+            "wait_seconds": float(_first_set(
+                full_tick.get("full_tick_wait_seconds", "wait_seconds"),
+                _env_float("BIGQMT_FULL_TICK_WAIT_SECONDS", 3.5))),
+            "poll_interval_seconds": float(_first_set(
+                full_tick.get("full_tick_poll_interval_seconds", "poll_interval_seconds"),
+                _env_float("BIGQMT_FULL_TICK_POLL_INTERVAL_SECONDS", 0.2))),
         }
         # Client-side local market-data cache. get_market_data_ex is cache-through;
         # get_local_data falls back to Big QMT by default so a MiniQMT-style
         # download of raw history can be followed by a read in another
         # adjustment mode. Set fallback_rpc=False only for an explicitly
         # offline, cache-only client.
-        local_cache_config = dict(client_config.get("local_cache_config") or {})
+        local_cache = _ClientSetting(redis_config, client_config.get("local_cache_config"))
         self.local_cache_config = {
             "enabled": _bool_value(
-                local_cache_config.get("enabled", merged_redis_config.get("local_cache_enabled")),
+                local_cache.get("local_cache_enabled", "enabled"),
                 _env_bool("BIGQMT_LOCAL_CACHE_ENABLED", True),
             ),
             "dir": (
-                local_cache_config.get("dir")
-                or merged_redis_config.get("local_cache_dir")
+                local_cache.get("local_cache_dir", "dir")
                 or os.environ.get("BIGQMT_LOCAL_CACHE_DIR")
                 or None
             ),
             "fallback_rpc": _bool_value(
-                local_cache_config.get("fallback_rpc", merged_redis_config.get("local_cache_fallback_rpc")),
+                local_cache.get("local_cache_fallback_rpc", "fallback_rpc"),
                 _env_bool("BIGQMT_LOCAL_CACHE_FALLBACK_RPC", True),
             ),
             "format": str(
-                local_cache_config.get("format")
-                or merged_redis_config.get("local_cache_format")
+                local_cache.get("local_cache_format", "format")
                 or os.environ.get("BIGQMT_LOCAL_CACHE_FORMAT")
                 or "auto"  # parquet if pyarrow is available, else pickle
             ),
@@ -810,11 +1432,12 @@ class BigQmtRpcClient:
         # answers reference/history reads in ~0.07ms without touching the QMT
         # python thread. Enabled by default; every miss falls back to RPC, so a
         # client that cannot reach it just runs as before.
-        formula_config = dict(
-            client_config.get("formula_server_config")
-            or merged_redis_config.get("formula_server")
-            or {}
-        )
+        # Merge, do not choose: the module's section (redis_config already
+        # folded in by load_client_config) updated by the explicit dict, key
+        # by key (#289). The old or-chain took the module section whole and
+        # never looked at the explicit dict.
+        formula_config = dict(client_config.get("formula_server_config") or {})
+        formula_config.update(redis_config.get("formula_server") or {})
         if "enabled" not in formula_config:
             formula_config["enabled"] = _env_bool("BIGQMT_FORMULA_ENABLED", True)
         self.formula_server_config = formula_config
@@ -858,6 +1481,9 @@ class BigQmtRpcClient:
             factory_config = {
                 "zmq": zmq_config,
                 "mysql": dict(config_redis.get("mysql") or {}, **self.mysql_config),
+                # 管道名两侧必须一致，否则客户端连的是另一条线 —— 表现为
+                # 「连不上」而不是「配错了」，最难查的那种。
+                "pipe": dict(config_redis.get("pipe") or {}),
             }
             self._transport_instance = build_transport(
                 self.transport_name,
@@ -887,7 +1513,15 @@ class BigQmtRpcClient:
                 self._formula_router_instance = _Disabled()
         return self._formula_router_instance
 
-    def call(self, method, params=None, account_id=None, timeout_seconds=None, use_formula=True):
+    def call_tracked(self, method, params=None, account_id=None, request_id=None,
+                     timeout_seconds=None):
+        """``call`` under a request_id the caller chose, so it can ask the
+        server what became of the request after a timeout (#303)."""
+        return self.call(method, params, account_id=account_id,
+                         timeout_seconds=timeout_seconds, request_id=request_id)
+
+    def call(self, method, params=None, account_id=None, timeout_seconds=None, use_formula=True,
+             request_id=None):
         target_account = str(account_id or self.account_id or "")
         if not target_account:
             raise ValueError(_missing_account_id_message())
@@ -904,7 +1538,7 @@ class BigQmtRpcClient:
         # 其他方法是静态参考数据，不受时间序列滞后影响，照常走快速路径。
         skip_formula = (
             router is not None
-            and method == "get_market_data_ex"
+            and method in ("get_market_data_ex", "get_market_data")
             and _formula_stale_active()
         )
         if router is not None and router.supports(method) and not skip_formula:
@@ -912,7 +1546,7 @@ class BigQmtRpcClient:
 
             try:
                 result = _restore_jsonable(router.call(method, params or {}))
-                if method == "get_market_data_ex":
+                if method in ("get_market_data_ex", "get_market_data"):
                     # 直连快照可能滞后（实测冻结数小时）——滞后即告警、
                     # 本次调用自动回落 RPC 桥拿实时数据，并进入冷却期
                     # 让后续调用直接跳过直连（到期重新探测，自愈）。
@@ -931,11 +1565,14 @@ class BigQmtRpcClient:
             # envelope the same way call_redis_rpc does.
             request = {
                 "schema_version": 1,
-                "request_id": uuid.uuid4().hex,
+                "request_id": str(request_id or uuid.uuid4().hex),
                 "account_id": target_account,
                 "method": method,
                 "params": params or {},
                 "ttl_seconds": 60,
+                # How long we wait. A server that only reaches this request
+                # after that refuses it instead of running it (#303).
+                "timeout_seconds": float(wait_seconds),
             }
             response = transport.send_request(request, wait_seconds)
         else:
@@ -945,6 +1582,7 @@ class BigQmtRpcClient:
                 method=method,
                 params=params or {},
                 timeout_seconds=wait_seconds,
+                request_id=request_id,
             )
         if not response.get("ok"):
             raise RpcServerRepliedError(
@@ -1164,6 +1802,62 @@ def _markets_of(codes):
     return markets
 
 
+# Which instrument kinds a market token has to be asked for, per exchange.
+#
+# The server narrows a market token to `types` and defaults to ("stock",) --
+# "SH" becomes the 上证A股 sector listing. So a token request that does not say
+# what it wants silently loses convertibles, funds, ETFs and indices: they are
+# subscribed and pushed, but absent from the first frame (#358). Asking for
+# ["all"] instead costs the whole exchange listing (26744 instruments, ~7.5s on
+# the adjust thread), which is exactly what #247/#104 removed. So infer the
+# kinds from the codes actually asked for.
+#
+# Prefixes are the exchanges' own code segments. Convertibles are not listed
+# here -- code_utils.is_bond_code already owns those prefixes, and duplicating
+# them is how the two copies drift apart.
+#
+#   SH  600/601/603/605/688/689 股票 · 5xx 基金/ETF · 000xxx 指数
+#   SZ  00x/30x 股票 · 15x/16x/18x 基金/ETF · 39xxxx 指数 (980xxx.SZ 也是指数，
+#       不在「沪深指数」板块里，所以不认它)
+#   BJ  43/83/87/88/92 股票 (899050.BJ 北证50 is an index and 沪深指数 does not
+#       carry it, so it stays unclassified on purpose)
+#
+# A code that matches nothing here is NOT guessed at: it goes down the direct
+# per-code path instead, which is slower and right. Guessing is how the codes
+# went missing in the first place.
+_PRIME_TYPES_BY_PREFIX = {
+    "SH": ((("600", "601", "603", "605", "688", "689"), ("stock",)),
+           (("5",), ("fund", "etf")),
+           (("000",), ("index",))),
+    # 30 rather than 300/301: 深证A股 already lists 302132.SZ, and the 30x
+    # segment is 创业板 only, so widening it cannot swallow another kind.
+    "SZ": ((("000", "001", "002", "003", "30"), ("stock",)),
+           (("15", "16", "18"), ("fund", "etf")),
+           (("39",), ("index",))),
+    "BJ": ((("43", "83", "87", "88", "92"), ("stock",)),),
+}
+
+
+def _prime_tick_types(code):
+    """Instrument kinds to narrow a market token to for `code`, or ().
+
+    () means "not confidently classified" -- the caller must not narrow on this
+    code's behalf.
+    """
+    text = str(code or "").strip().upper()
+    if "." not in text:
+        return ()
+    pure, _, market = text.partition(".")
+    if not pure.isdigit():
+        return ()
+    if is_bond_code(text):
+        return ("convertible",)
+    for prefixes, kinds in _PRIME_TYPES_BY_PREFIX.get(market, ()):
+        if pure.startswith(prefixes):
+            return kinds
+    return ()
+
+
 def _full_tick_params(codes, types=None):
     """RPC params for get_full_tick. `types` narrows a whole-market token to one
     instrument kind at REQUEST time -- filtering the reply would still pay QMT's
@@ -1186,6 +1880,36 @@ DIRECT_PATH_FIELDS = ("open", "high", "low", "close", "volume", "amount")
 PRE_CLOSE_BACKFILL_PERIODS = ("1w",)
 _PRE_CLOSE_PERIOD_STARTS = {"1w": _iso_week_start_label}
 _PRE_CLOSE_NOTICE = {"shown": False}
+
+# Periods whose ongoing bar QMT synthesizes from the request window instead
+# of from all local data (#226). Pinned as a set the way #172 pinned its
+# period list -- a new period enters only with a measurement behind it.
+RESYNTH_ONGOING_PERIODS = ("1w", "1mon", "1q", "1hy", "1y")
+RESYNTH_PERIOD_STARTS = {
+    "1w": _iso_week_start_label,
+    "1mon": _month_start_label,
+    "1q": _quarter_start_label,
+    "1hy": _halfyear_start_label,
+    "1y": _year_start_label,
+}
+_RESYNTH_NOTICE = {"shown": False}
+
+
+def _in_trading_session(now):
+    """Weekday inside the day session (auction open through the settle
+    margin after close). The resynth used to start at 09:30, but the
+    zero-volume ongoing bar was measured at 09:26 (#307): the terminal's
+    rescue serves a synthesized period bar right after the auction match,
+    before continuous trading opens. After the close the ongoing multi-day
+    bar is finalized and passes through untouched (#226's after-close
+    control)."""
+    if now.weekday() > 4:
+        return False
+    return _dt.time(9, 15) <= now.time() <= _dt.time(15, 5)
+
+
+def _now():
+    return _dt.datetime.now()
 
 
 def _notice_field_list_cost(field_list):
@@ -1603,9 +2327,14 @@ class BigQmtXtData:
         )
         data = self._call("get_market_data", **params)
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
-        return self._heal_adjusted("get_market_data", params, data)
+        data = self._heal_adjusted("get_market_data", params, data)
+        # The documented MiniQMT shape is dict[field] -> DataFrame indexed by
+        # stock with time columns; Big QMT sends long frames. Convert after
+        # the heal so the heal sees the shape it knows.
+        return _to_documented_market_data_shape(data, field_list, stock_list, period)
 
-    def _get_market_data_ex_batch(self, params, timeout_seconds=None, use_formula=True):
+    def _get_market_data_ex_batch(self, params, timeout_seconds=None, use_formula=True,
+                                  heal=True):
         """One RPC's worth of bars, healed and normalized. No caching."""
         if use_formula:
             data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds)
@@ -1614,10 +2343,25 @@ class BigQmtXtData:
             data = self.client.call("get_market_data_ex", params, timeout_seconds=timeout_seconds,
                                     use_formula=False)
         # Self-heal adjusted reads (all-zero bars -> server raw download + retry).
-        data = self._heal_adjusted("get_market_data_ex", params, data, timeout_seconds=timeout_seconds)
+        if heal:
+            data = self._heal_adjusted("get_market_data_ex", params, data,
+                                       timeout_seconds=timeout_seconds)
         # Normalize Big QMT's stime-indexed frame to MiniQMT shape (time-indexed).
         if isinstance(data, dict):
-            data = _normalize_market_data_result(data, field_list=params.get("field_list"))
+            # Capture the degraded-answer markers first: normalisation copies,
+            # slices and drops columns, and pandas only propagates ``attrs``
+            # on a best-effort basis -- a marker that survives on one pandas
+            # version and not the next is worse than none (#237).
+            markers = dict((code, _partial_marker(frame))
+                           for code, frame in data.items())
+            data = _normalize_market_data_result(
+                data, field_list=params.get("field_list"), period=params.get("period"))
+            if isinstance(data, dict) and any(markers.values()):
+                for code, marker in markers.items():
+                    if marker is not None and code in data:
+                        _attach_partial_marker(data[code], marker)
+                _warn_partial_market_data(
+                    [marker for marker in markers.values() if marker])
         return data
 
     @staticmethod
@@ -1731,6 +2475,240 @@ class BigQmtXtData:
         rows.sort()
         return rows
 
+    def _resynth_ongoing_multiday_bars(self, data, period, start_time,
+                                       end_time, dividend_type,
+                                       timeout_seconds=None, use_formula=True):
+        """Rebuild the in-progress multi-day bar from the period's daily bars (#226).
+
+        Big QMT synthesizes an ongoing 1w/1mon/1q/1hy/1y bar from the bars in
+        the REQUEST window, so a window covering only today answers the weekly
+        bar with today's volume and the week's earlier days lost. MiniQMT's
+        get_local_data synthesizes from ALL local base data and start/end only
+        filters the returned rows -- this rebuild is what makes the bridge
+        match that.
+
+        Two result-driven triggers on top of the original #226 window shape
+        (both from #307, measured live on terminal build 2.0.8.300):
+
+        * reconcile -- the last bar IS the ongoing period: its volume is
+          checked against the daily sum of that period, whatever the window
+          shape. The zero-volume form was measured at 09:26 right after the
+          auction match (the rescue's synthesized bar carries no period
+          accumulation) and the partial-days form is the original #226
+          truncation; a window covering the whole period is NO LONGER an
+          exemption, because the covered answer was measured wrong too. A
+          bar that already agrees passes through untouched, so the one
+          extra daily read is the only cost on a healthy terminal.
+        * append -- the last bar is finalized history but the request window
+          covers the current period (start <= its start) and that period has
+          daily bars: the MISSING ongoing bar is appended, synthesized from
+          the dailies. Measured mid-session: the in-session answer simply
+          drops the current period's bar.
+
+        Guards kept: multi-day periods only, an explicit start_time, the
+        clock inside the day session (09:15..15:05), nothing after the close
+        when the bar is finalized.
+
+        Degrades like the preClose backfill (#166): a failed or empty daily
+        read keeps the terminal's answer and warns once; nothing raises.
+        """
+        if str(period or "") not in RESYNTH_ONGOING_PERIODS or not isinstance(data, dict):
+            return data
+        start_text = str(start_time or "")
+        if not start_text:
+            return data          # count-based reads never showed the truncation
+        now = _now()
+        if not _in_trading_session(now):
+            return data
+        today = now.strftime("%Y%m%d")
+        start_day = _digits_only(start_text)[:8]
+        end_day = _digits_only(str(end_time or ""))[:8]
+        current_start = RESYNTH_PERIOD_STARTS[period](today)
+        if current_start is None:
+            return data
+        # A window "covers" the ongoing period only when BOTH ends straddle
+        # it: reading pure history (an end inside a past period) never asked
+        # for the ongoing bar, so appending one there would invent data.
+        covers_current = start_day <= current_start and (
+            not end_day or end_day >= current_start)
+
+        reconcile, append = {}, {}
+        for code, frame in data.items():
+            labels = _frame_bar_labels(frame)
+            if not labels:
+                # No rows at all: append when the window covers the period.
+                if covers_current:
+                    append[code] = current_start
+                continue
+            label = labels[-1]
+            period_start = RESYNTH_PERIOD_STARTS[period](label)
+            period_end = _period_end_label(period, label)
+            if period_start is None or period_end is None:
+                continue
+            if period_start <= today <= period_end:
+                # The ongoing bar itself: reconcile against the daily sum
+                # regardless of the window shape (#307).
+                reconcile[code] = period_start
+                continue
+            if today > period_end and covers_current:
+                # Finalized history where the ongoing bar should also be:
+                # append it from the period's dailies (#307 missing form).
+                append[code] = current_start
+        if not reconcile and not append:
+            return data
+
+        wanted = sorted(set(reconcile) | set(append))
+        first = min(reconcile.values()) if reconcile else current_start
+        try:
+            daily = self.get_market_data_ex(
+                field_list=["open", "high", "low", "close", "volume", "amount"],
+                stock_list=wanted, period="1d",
+                start_time=first, end_time=today, count=-1,
+                dividend_type=dividend_type, fill_data=False,
+                timeout_seconds=timeout_seconds, use_formula=use_formula,
+                backfill_pre_close=False, resynth_ongoing_multiday=False,
+            )
+        except Exception as exc:
+            # The terminal's answer was good enough to serve; taking the whole
+            # read down over the rebuild would be the worse bug.
+            log.warning("ongoing %s bar rebuild skipped: %s", period, exc)
+            return data
+
+        rebuilt = appended = 0
+        for code, period_start in reconcile.items():
+            frame = data.get(code)
+            daily_frame = daily.get(code) if isinstance(daily, dict) else None
+            summary = self._sum_daily_bars(daily_frame, period_start, today)
+            if summary is None:
+                continue
+            if not self._last_bar_disagrees(frame, summary):
+                continue          # already the daily sum: leave it untouched
+            if self._write_last_bar(frame, summary):
+                rebuilt += 1
+        for code, period_start in append.items():
+            frame = data.get(code)
+            daily_frame = daily.get(code) if isinstance(daily, dict) else None
+            summary = self._sum_daily_bars(daily_frame, period_start, today)
+            if summary is None:
+                continue          # no dailies in the period yet: nothing to add
+            label = _period_end_label(period, period_start)
+            if label is None:
+                continue
+            if self._append_ongoing_bar(frame, label, summary):
+                appended += 1
+        if rebuilt or appended:
+            self._notice_resynth_ongoing(period, rebuilt + appended, appended)
+        return data
+
+    @staticmethod
+    def _last_bar_disagrees(frame, summary):
+        """True when the last bar's volume differs from the daily sum.
+
+        Volume is the reconciliation key (#307): every broken form measured
+        so far -- the 09:26 zero-volume rescue bar, the #226 window
+        truncation, a partial-days synthesis -- shows up there. A frame that
+        never asked for the volume column cannot be proved right; reporting
+        disagreement keeps the rebuild as the fallback for those.
+        """
+        try:
+            values = list(frame["volume"])
+        except Exception:
+            return True          # no volume column: cannot prove agreement
+        if not values:
+            return True
+        wanted = summary.get("volume")
+        if wanted is None:
+            return False         # nothing to reconcile against
+        current = _bar_float(values[-1])
+        if current is None:
+            return True
+        return abs(current - wanted) > max(1.0, abs(wanted) * 1e-6)
+
+    @staticmethod
+    def _append_ongoing_bar(frame, label, summary):
+        """Append the missing ongoing bar, only into columns the frame has."""
+        row = {name: value for name, value in summary.items()
+               if value is not None and name in list(frame.columns)}
+        if not row:
+            return False
+        try:
+            frame.loc[label] = row
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _sum_daily_bars(frame, period_start, today):
+        """open/high/low/close/volume/amount for one ongoing period from its
+        daily bars, or None when there is nothing to sum."""
+        labels = _frame_bar_labels(frame) if frame is not None else None
+        if not labels:
+            return None
+        try:
+            columns = {name: list(frame[name]) for name in
+                       ("open", "high", "low", "close", "volume", "amount")}
+        except Exception:
+            return None
+        rows = []
+        for index, label in enumerate(labels):
+            day = _digits_only(label)[:8]
+            if not day or day < period_start or day > today:
+                continue
+            rows.append({name: _bar_float(columns[name][index])
+                         for name in columns})
+        rows = [row for row in rows if row["close"] is not None]
+        if not rows:
+            return None
+        out = {
+            "open": next((row["open"] for row in rows if row["open"] is not None), None),
+            "high": max((row["high"] for row in rows if row["high"] is not None), default=None),
+            "low": min((row["low"] for row in rows if row["low"] is not None), default=None),
+            "close": next((row["close"] for row in reversed(rows) if row["close"] is not None), None),
+        }
+        for name in ("volume", "amount"):
+            values = [row[name] for row in rows if row[name] is not None]
+            out[name] = sum(values) if values else None
+        return out
+
+    @staticmethod
+    def _write_last_bar(frame, summary):
+        """Write the rebuilt values into the last bar, only into columns the
+        caller actually asked for. True when anything was written."""
+        wrote = False
+        for name, value in summary.items():
+            if value is None:
+                continue
+            try:
+                values = list(frame[name])
+            except Exception:
+                continue          # the column was never requested
+            if not values:
+                continue
+            values[-1] = value
+            try:
+                frame[name] = values
+                wrote = True
+            except Exception:
+                continue
+        return wrote
+
+    @staticmethod
+    def _notice_resynth_ongoing(period, count, appended=0):
+        """Say once that ongoing bars are rebuilt here, not answered by QMT."""
+        if _RESYNTH_NOTICE["shown"]:
+            return
+        _RESYNTH_NOTICE["shown"] = True
+        try:
+            log.info(
+                "%d ongoing %s bar(s) were reconciled from the period's "
+                "daily bars and %d missing one(s) appended (issues #226 and "
+                "#307): big QMT synthesizes them from the request window or "
+                "drops them mid-session, miniQMT serves the period's "
+                "accumulation. Pass resynth_ongoing_multiday=False to serve "
+                "the raw answer.", count - appended, period, appended)
+        except Exception:
+            pass
+
     @staticmethod
     def _notice_pre_close_backfill(period):
         """Say once that these preClose values are derived, not the terminal's."""
@@ -1762,8 +2740,23 @@ class BigQmtXtData:
         timeout_seconds=None,
         use_formula=True,
         backfill_pre_close=True,
+        resynth_ongoing_multiday=True,
+        heal=True,
+        subscribe=None,
     ):
         """Pull bars over RPC, in batches of ``chunk_size`` codes.
+
+        ``heal=False`` skips the self-heal that answers an unready raw store
+        with a server-side raw download. The one caller that must turn it
+        off is ``download_history_data2``'s readiness poll (#275): it is
+        waiting for a download it just submitted, and healing there
+        re-submits that same download every 1.5s round, pushing the landing
+        it is waiting for further back until the 60s budget is gone.
+
+        ``subscribe`` 是 QMT 原生签名的最后一个参数：True（大 QMT 默认）会把
+        查过的标的塞进常驻内存订阅池，批量拉分钟线时终端内存单调上涨直到崩溃
+        （#361）；False 只读本地已下载数据。缺省 None = 不传、维持原生默认。
+        批量历史回补请显式传 ``subscribe=False``。
 
         Cache-through: whatever is fetched is written to the local cache (keyed
         by dividend_type), so it stays the latest -- important for 前复权 data,
@@ -1799,12 +2792,15 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
+        if subscribe is not None:
+            # 只在调用方给了才传（#361）：不给 = 大 QMT 原生默认 True，行为不变。
+            base["subscribe"] = bool(subscribe)
         step = DEFAULT_MARKET_DATA_CHUNK if chunk_size is None else int(chunk_size)
 
         if step <= 0 or len(codes) <= step:
             data = self._get_market_data_ex_batch(
                 dict(base, stock_list=codes), timeout_seconds=timeout_seconds,
-                use_formula=use_formula,
+                use_formula=use_formula, heal=heal,
             )
         else:
             data = {}
@@ -1814,7 +2810,7 @@ class BigQmtXtData:
                 try:
                     part = self._get_market_data_ex_batch(
                         dict(base, stock_list=batch), timeout_seconds=timeout_seconds,
-                        use_formula=use_formula,
+                        use_formula=use_formula, heal=heal,
                     )
                 except Exception as exc:
                     # Losing one batch must not lose the others: a partial
@@ -1839,6 +2835,15 @@ class BigQmtXtData:
                 timeout_seconds=timeout_seconds, use_formula=use_formula,
             )
 
+        if resynth_ongoing_multiday:
+            # Same rule as the backfill: the cache keeps the rebuilt bar, not
+            # the window-truncated one (#226).
+            data = self._resynth_ongoing_multiday_bars(
+                data, period=period, start_time=start_time, end_time=end_time,
+                dividend_type=dividend_type, timeout_seconds=timeout_seconds,
+                use_formula=use_formula,
+            )
+
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
             for code, df in data.items():
@@ -1859,17 +2864,24 @@ class BigQmtXtData:
         dividend_type="none",
         fill_data=True,
         data_dir=None,
+        resynth_ongoing_multiday=True,
     ):
         """Read bars from the CLIENT-side local cache — no RPC to Big QMT.
 
         Returns a dict {code: DataFrame}. A cache-missed code is omitted, unless
         local_cache_fallback_rpc is enabled (then it is fetched + cached over RPC).
+
+        The cache-less RPC branch answers from the terminal's local files and
+        gets the same ongoing multi-day reconciliation get_market_data_ex has
+        (#226/#307): with the cache off this is THE read callers use for
+        trusted local data, and the terminal's synthesized-period answer drops
+        or zeroes the ongoing bar there just the same.
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         cache = self._local_cache()
         if cache is None:
             # Cache disabled -> behave like a plain RPC local-data read.
-            return self._call(
+            data = self._call(
                 "get_local_data",
                 field_list=_as_list(field_list),
                 stock_list=codes,
@@ -1881,6 +2893,27 @@ class BigQmtXtData:
                 fill_data=fill_data,
                 data_dir=data_dir,
             )
+            if (resynth_ongoing_multiday
+                    and str(period or "") in RESYNTH_ONGOING_PERIODS):
+                # The raw local read answers a bare frame for one code and a
+                # {code: frame} dict for several (#307 was reported through
+                # the dict shape); wrap the single-code frame so both get the
+                # same reconciliation, then unwrap.
+                single = None
+                payload = data
+                if not isinstance(data, dict) and codes:
+                    single = codes[0]
+                    payload = {single: data}
+                if isinstance(payload, dict) and payload:
+                    payload = self._resynth_ongoing_multiday_bars(
+                        payload, period=period, start_time=start_time,
+                        end_time=end_time, dividend_type=dividend_type,
+                    )
+                data = payload.get(single) if single is not None else payload
+            if isinstance(data, dict):
+                return {code: _ensure_kline_columns(frame, field_list=field_list, period=period)
+                        for code, frame in data.items()}
+            return _ensure_kline_columns(data, field_list=field_list, period=period)
         fields = list(field_list or [])
         result = {}
         missing = []
@@ -1899,7 +2932,9 @@ class BigQmtXtData:
                 df = fetched.get(code)
                 if df is not None and getattr(df, "shape", (0,))[0] > 0:
                     result[code] = self._select_fields(
-                        _normalize_market_data_frame(df, field_list=fields),
+                        _ensure_kline_columns(
+                            _normalize_market_data_frame(df, field_list=fields),
+                            field_list=fields, period=period),
                         fields,
                     )
         return result
@@ -1946,6 +2981,60 @@ class BigQmtXtData:
         except Exception:
             return False
 
+    @staticmethod
+    def _is_placeholder_frame(frame):
+        """One code's frame is a no-trade placeholder: every bar has
+        ``volume == 0`` and ``suspendFlag == 1``.
+
+        Big QMT answers a window it has no local bars for with placeholder
+        bars rather than an empty frame, and the fill differs by build. The
+        国金 terminal fills zeros (the all-zero shape ``_is_all_zero_any``
+        catches). A 华泰 terminal on 0.3.40 filled the previous close into
+        open/high/low/close instead (#339, @wolfeee: 002594.SZ 1m from
+        20260918 answered 150 bars dated 20260919 -- a Saturday -- all at
+        84.3, volume 0, suspendFlag 1). Nonzero prices slip past the
+        all-zero detector, so the heal never fired and the caller was handed
+        a day of flat fake bars with nothing said. Both columns are required:
+        a frame without ``suspendFlag`` (the FormulaServer six-column path)
+        never matches, and one nonzero volume anywhere means real trades.
+        """
+        cols = getattr(frame, "columns", None)
+        if cols is None:
+            return False
+        cols = list(cols)
+        if "volume" not in cols or "suspendFlag" not in cols:
+            return False
+        if len(frame) == 0:
+            return False
+        try:
+            return bool((frame["volume"] == 0).all() and (frame["suspendFlag"] == 1).all())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_placeholder_all(data):
+        """Every served frame is a placeholder (see ``_is_placeholder_frame``).
+
+        ``all`` rather than ``any`` on purpose: a genuinely suspended stock
+        answers the same shape truthfully, and one of those inside a
+        portfolio read must not turn the whole read into a per-call heal
+        (download + sleep + re-read). Every code flat at once is the
+        raw-store-not-populated signal, the same reasoning as the majority
+        guard on the none-adjusted branch.
+        """
+        try:
+            cols = getattr(data, "columns", None)
+            if cols is not None:
+                return BigQmtXtData._is_placeholder_frame(data)
+            if isinstance(data, dict) and data:
+                frames = [v for v in data.values() if getattr(v, "columns", None) is not None]
+                if not frames:
+                    return False
+                return all(BigQmtXtData._is_placeholder_frame(v) for v in frames)
+            return False
+        except Exception:
+            return False
+
     def _ensure_server_raw(self, codes, period, start_time, end_time):
         """Trigger a server-side raw download so adjusted bars can be computed."""
         try:
@@ -1976,13 +3065,20 @@ class BigQmtXtData:
     def _heal_adjusted(self, method, params, data, wait_seconds=2.0, timeout_seconds=None):
         """Self-heal reads served from an unready raw store: if the adjusted
         pull came back all-zero, or a none-adjusted pull came back missing
-        most requested codes, trigger a server-side raw download, wait for
-        async landing, retry once."""
+        most requested codes, or every code came back as a no-trade
+        placeholder frame (#339), trigger a server-side raw download, wait
+        for async landing, retry once."""
         dividend_type = str(params.get("dividend_type") or "none").lower()
         codes = list(params.get("stock_list") or params.get("stock_code") or [])
         if not codes:
             return data
-        if dividend_type in ("", "none"):
+        if self._is_placeholder_all(data):
+            # Applies on both branches: the placeholder fill is a raw-store
+            # answer, not an adjustment artefact, so a none-adjusted read
+            # gets the same flat bars -- and those codes count as *served*,
+            # which is why the missing-majority guard below never sees them.
+            pass
+        elif dividend_type in ("", "none"):
             # None-adjusted bars are never zero-filled, so the all-zero
             # detector does not apply -- a *missing* code means the server
             # has no raw bars for it at all. Big QMT's raw store is not
@@ -2008,8 +3104,27 @@ class BigQmtXtData:
         )
         time.sleep(wait_seconds)
         if timeout_seconds is not None:
-            return self.client.call(method, params, timeout_seconds=timeout_seconds)
-        return self._call(method, **params)
+            healed = self.client.call(method, params, timeout_seconds=timeout_seconds)
+        else:
+            healed = self._call(method, **params)
+        if self._is_placeholder_all(healed):
+            # The download did not change the answer: either the terminal
+            # has no data to download for this window (a real suspension,
+            # or the reporter's terminal where the download RPC itself
+            # answers False, #339) -- say so rather than hand back a flat
+            # frame that reads like bars.
+            log.warning(
+                "%s %s %s %s~%s: every bar is volume 0 / suspendFlag 1 after a "
+                "server-side download and retry. These are Big QMT placeholder "
+                "bars, not trades -- the terminal has no local %s data for this "
+                "window. Check download_history_data2 on this terminal "
+                "(probe_capabilities -> qmt_globals) or download the period in "
+                "the terminal's 数据管理 first.",
+                method, ",".join(codes[:5]) + (",..." if len(codes) > 5 else ""),
+                params.get("period", "1d"), params.get("start_time", ""),
+                params.get("end_time", ""), params.get("period", "1d"),
+            )
+        return healed
 
     def _pull_and_cache(self, codes, period, start_time, end_time, count, dividend_type="none"):
         """Fetch codes over RPC (get_market_data_ex already caches them)."""
@@ -2146,17 +3261,27 @@ class BigQmtXtData:
         )
 
     def _build_quote_push_channel(self):
-        """Build the push-channel subscriber matching the RPC transport: redis
-        deployments derive the channel locally; zmq deployments connect to the
-        server PUB socket (host from zmq config, RPC port + 1)."""
-        client = self.client
-        from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+        return _build_quote_push_channel(self.client)
 
-        transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
-        if transport_name in ("zmq",):
-            address = _quote_push_zmq_address(client)
-            return ZmqQuotePushChannel(connect_address=address)
-        return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+    def quote_subscription_status(self):
+        """What whole-quote combos the bridge thinks are alive, and how stale.
+
+        The diagnostic for "something keeps pushing and I lost the seq": a
+        combo staying fresh has a LIVE keepalive feeding it (a leftover client
+        process); one going silent past the heartbeat timeout is about to be
+        reaped by the server (measured live: ~30s after the client dies).
+        """
+        return self.client.call("quote_subscription_status", {})
+
+    def quote_unsubscribe_all(self):
+        """Kill every whole-quote subscription on the bridge, no seq needed.
+
+        keepalive is a no-op on unknown sub_ids, so a force-cleared combo
+        stays down until someone subscribes again.
+        """
+        return self.client.call("quote_unsubscribe_all", {})
+
+    _SUBSCRIBE_PRIME_MAX_CODES = 100
 
     def subscribe_whole_quote(self, code_list, callback=None):
         session = self._whole_quote_session()
@@ -2169,12 +3294,96 @@ class BigQmtXtData:
         # subscribe_whole_quote, which is not narrowed, so a narrowed snapshot
         # would hand the subscriber 2315 stocks and then start pushing all
         # 26744 instruments. The primer has to cover what the push covers.
+        #
+        # Large individual code lists (e.g. 3000 stocks) would block the server
+        # adjust thread for seconds via get_full_tick(thousands_of_codes). Instead,
+        # extract the exchange tokens (SH/SZ/...) from the codes and call
+        # get_full_tick with those tokens -- QMT handles exchange tokens as
+        # whole-exchange operations (fast). Then filter the result to only the
+        # codes the caller actually asked for.
+        #
+        # The token path cannot pass ["all"] -- that is the 26744-instrument
+        # read #247 removed -- so it passes the kinds the requested codes
+        # actually are (#358). Saying nothing there is what made convertibles
+        # disappear from the first frame above 100 codes while the push kept
+        # delivering them.
         if callback is not None:
             try:
-                callback(self.get_full_tick(code_list, types=["all"]))
+                # Called unconditionally, including with an empty snapshot:
+                # that is what this did before #247, and a subscriber that
+                # waits for its first callback must not hang because the
+                # primer happened to come back empty.
+                callback(self._prime_snapshot(code_list))
             except Exception:
                 pass
         return sub_id
+
+    # Exchange tokens QMT actually answers a whole-market snapshot for.
+    # Measured on the live terminal: SH 卡 SZ together return 5218 rows in
+    # ~330ms, BJ returns 343. Every futures token -- SF DF ZF IF INE GF --
+    # returns **0 rows**, so routing a futures list through the token path
+    # yields an empty prime, and the subscriber silently never gets a first
+    # frame. That is the #95 shape again: the subscription looks alive, the
+    # snapshot is just missing.
+    _WHOLE_MARKET_TOKENS = ("SH", "SZ", "BJ")
+
+    def _prime_snapshot(self, code_list):
+        """First-frame snapshot for subscribe_whole_quote.
+
+        Per-code get_full_tick runs on QMT's adjust thread, and its cost grows
+        with the list: measured medians on the live terminal were ~170ms at 100
+        codes, ~500ms at 200, ~2.5s at 500, ~9.5s at 1000, and a hard
+        TimeoutError at 3000 -- with the adjust thread blocked for that whole
+        time, which stalls the drain and queues every other RPC behind it
+        (#247). A whole-market token is ~330ms flat regardless of size, so
+        above the threshold the token path wins.
+
+        Codes are passed to QMT **verbatim**; only the exchange suffix is
+        upper-cased for routing and only upper-cased copies are used for
+        matching. Big QMT has cu2610.SF and not CU2610.SF, so upper-casing a
+        code before sending it silently kills futures subscriptions (#58/#95).
+        """
+        codes = [str(c).strip() for c in (code_list or []) if str(c or "").strip()]
+        if not codes:
+            return {}
+        if len(codes) <= self._SUBSCRIBE_PRIME_MAX_CODES:
+            return self.get_full_tick(codes, types=["all"]) or {}
+
+        # Split by whether this code's exchange can be primed wholesale.
+        whole, direct = [], []
+        for code in codes:
+            suffix = code.rsplit(".", 1)[-1].upper() if "." in code else ""
+            (whole if suffix in self._WHOLE_MARKET_TOKENS else direct).append(code)
+
+        snapshot = {}
+        if whole:
+            wanted = set()
+            tokens = set()
+            kinds = set()
+            for code in whole:
+                code_kinds = _prime_tick_types(code)
+                if not code_kinds:
+                    # Unclassified: the server would narrow the token to stocks
+                    # and drop this code without saying so (#358). Read it
+                    # directly instead -- slow beats silently absent.
+                    direct.append(code)
+                    continue
+                wanted.add(code.upper())
+                tokens.add(code.rsplit(".", 1)[-1].upper())
+                kinds.update(code_kinds)
+            if tokens:
+                # types= is what keeps the push side and the primer covering the
+                # same instruments: the push is ContextInfo's own
+                # subscribe_whole_quote and is not narrowed at all.
+                full = self.get_full_tick(sorted(tokens), types=sorted(kinds)) or {}
+                snapshot.update(
+                    (k, v) for k, v in full.items() if str(k).upper() in wanted)
+        if direct:
+            # No whole-market token for these (futures, and anything new).
+            # Slow for a long list, but slow-and-correct beats fast-and-empty:
+            # before #247 this was the only path, so it is not a regression.
+            snapshot.update(self.get_full_tick(direct, types=["all"]) or {})
+        return snapshot
 
     def unsubscribe_quote(self, seq):
         # Three kinds of handle now: whole-quote / tick subscriptions owned by
@@ -2212,9 +3421,18 @@ class BigQmtXtData:
             time.sleep(3600)
 
     def get_divid_factors(self, stock_code, start_time="", end_time=""):
-        return self._call("get_divid_factors", stock_code=stock_code, start_time=start_time, end_time=end_time)
+        """除权除息因子，返回 DataFrame，对齐 ``xtdata.get_divid_factors``。
 
-    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None, download_timeout_seconds=180.0, data_wait_seconds=60.0):
+        行是除权日（毫秒时间戳，同官方保留原始键），列是 ``interest`` /
+        ``stockBonus`` / ``stockGift`` / ``allotNum`` / ``allotPrice`` /
+        ``gugai`` / ``dr``。线上仍是大 QMT 原生的 ``dict{时间戳: [7 个数]}``，
+        走原始 RPC（含 ``getDividFactors`` 别名）拿到的还是那个 dict。
+        """
+        data = self._call("get_divid_factors", stock_code=stock_code,
+                          start_time=start_time, end_time=end_time)
+        return _divid_factors_frame(data)
+
+    def download_history_data2(self, stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none", chunk_size=None, download_timeout_seconds=180.0, data_wait_seconds=10.0):
         """Pull bars from Big QMT over RPC and cache them locally, in batches.
 
         Mirrors xtdata.download_history_data2: after this, get_local_data(..., the
@@ -2236,10 +3454,21 @@ class BigQmtXtData:
         ``download_timeout_seconds`` covers the server-side download only; it is
         generous because a cold code with a wide window can take minutes.
 
+        ``data_wait_seconds`` is how long a batch keeps re-polling for codes the
+        first pull came back empty for. The server download returns after the
+        data landed (measured: 20,726 1m bars readable 0.3s after a 0.6-1.4s
+        download), so an empty first pull almost always means the terminal
+        has nothing for that code (suspended, new, delisted) and will not get
+        it by waiting. The old default of 60s made one such code hold its
+        whole batch for a minute (#339: "12s per contract" on 300 contracts).
+        10s is a few polls, enough for a terminal that lands data late.
+
         The server-side download is best-effort while the client pull can still
         save it (cache enabled), but with the local cache disabled it is the
         entire job -- its failure raises instead of reporting {finished: total},
-        which would be the fake progress of issue #47.
+        which would be the fake progress of issue #47. With the cache enabled
+        the same applies once the pull comes back empty for a code: a failed
+        download that nothing stood in for raises, naming the codes (#339).
         """
         codes = [str(c) for c in (stock_list or []) if str(c or "").strip()]
         if not codes:
@@ -2264,7 +3493,7 @@ class BigQmtXtData:
         # or the result is all zeros.
         server_download_error = None
         try:
-            self.client.call(
+            download_reply = self.client.call(
                 "download_history_data2",
                 {
                     "stock_list": codes,
@@ -2274,6 +3503,14 @@ class BigQmtXtData:
                 },
                 timeout_seconds=float(download_timeout_seconds),
             )
+            if not download_reply:
+                # 服务端显式回 False = 下载任务没被受理（#339：恒 False 曾经
+                # 从这里漏过去，下面的空拉被当成「停牌/退市」容忍掉，最终报出
+                # finished==total 的假进度）。失败必须响（#47 契约）。
+                server_download_error = RuntimeError(
+                    "server reported download_history_data2 = %r: the terminal "
+                    "did not accept the download task (codes=%d period=%s)" % (
+                        download_reply, len(codes), period))
         except Exception as exc:
             # Best-effort only while the pull below can still save the
             # download (data already on the server). With the local cache
@@ -2324,7 +3561,13 @@ class BigQmtXtData:
                     count=-1,
                     dividend_type=dividend_type,
                     fill_data=False,  # fill 会用全 0 占位行冒充数据，轮询判定必须关掉
-                    timeout_seconds=float(data_wait_seconds),
+                    # The RPC timeout for one pull is not the poll budget: a
+                    # batch of 300 codes x 20k bars is a multi-second reply.
+                    timeout_seconds=max(float(data_wait_seconds), 60.0),
+                    # 等的就是刚提交的那笔下载。heal 看到「还没落地」会把它原样
+                    # 再提交一遍、睡 2 秒、再读——每轮如此，等待目标被反复推后，
+                    # 单票冷启动必然打满 60 秒（#275）。轮询里的读不参与 heal。
+                    heal=False,
                 )
                 ready = 0
                 for code in batch:
@@ -2334,6 +3577,23 @@ class BigQmtXtData:
                 if ready >= len(batch) or time.time() >= deadline:
                     break
                 time.sleep(1.5)
+            if server_download_error is not None and ready < len(batch):
+                # The server-side download failed AND the pull found nothing
+                # to save for some of the batch: the download did not happen
+                # and nothing stands in for it. Reporting {finished: total}
+                # here is the fake progress of #47 one branch over (#339).
+                # A failed download whose bars were already on the server
+                # still finishes above (ready == len(batch)); an empty code
+                # after a download that did NOT fail keeps the tolerant
+                # timeout (suspended / delisted codes have no bars to wait for).
+                missing = [code for code in batch
+                           if getattr((data or {}).get(code), "shape", (0,))[0] == 0]
+                raise RuntimeError(
+                    "download_history_data2 %s %s~%s: the server-side download "
+                    "failed (%s) and the pull found no rows for %s -- nothing was "
+                    "downloaded for these codes" % (
+                        period, start_time, end_time, server_download_error,
+                        ",".join(missing)))
             for code in batch:
                 finished += 1
                 if callback is not None:
@@ -2389,8 +3649,32 @@ class BigQmtXtData:
         # 签名一致；大 QMT 那边这个调用没有增量参数，服务端按全量下载处理。
         return self._call("download_history_contracts")
 
-    def get_option_list(self, undl_code, dedate, opttype="", isavailavle=False):
-        return self._call("get_option_list", undl_code=undl_code, dedate=dedate, opttype=opttype, isavailavle=isavailavle)
+    def get_option_list(
+        self,
+        undl_code,
+        dedate,
+        opttype="",
+        isavailavle=None,
+        available=None, # fix typo
+    ):
+        if (
+            available is not None
+            and isavailavle is not None
+            and bool(isavailavle) != bool(available)
+        ):
+            raise ValueError("isavailavle and available must not conflict")
+        selected_available = (
+            bool(available)
+            if available is not None
+            else bool(isavailavle) if isavailavle is not None else False
+        )
+        return self._call(
+            "get_option_list",
+            undl_code=undl_code,
+            dedate=dedate,
+            opttype=opttype,
+            isavailavle=selected_available,
+        )
 
     def get_his_option_list(self, undl_code, dedate):
         return self._call("get_his_option_list", undl_code=undl_code, dedate=dedate)
@@ -2632,6 +3916,14 @@ class BigQmtXtData:
     def get_option_detail_data(self, stockcode):
         return self._call("get_option_detail_data", stockcode=stockcode)
 
+    def get_option_detail_data_batch(self, stockcodes, timeout_seconds=300.0):
+        """Fetch many option details in one RPC; QMT loops over the codes."""
+        return self.client.call(
+            "get_option_detail_data_batch",
+            {"stockcodes": list(stockcodes)},
+            timeout_seconds=timeout_seconds,
+        ) or {}
+
     def get_option_undl_data(self, undl_code_ref=""):
         return self._call("get_option_undl_data", undl_code_ref=undl_code_ref)
 
@@ -2688,6 +3980,190 @@ class BigQmtXtData:
 
     def get_stock_name(self, stock):
         return self._call("get_stock_name", stock=stock)
+
+    # ------------------------------------------------------------------
+    # 合约/品种基础查询（ContextInfo 扩展，大 QMT 独有）—— issue #262
+    #
+    # README「RPC 接口」表的「合约/品种」一行按名字列了这些方法，服务端
+    # 白名单和适配器也一直有，缺的只是这层同名包装 —— 于是
+    # `xtdata.get_open_date("600519.SH")` 抛 AttributeError，而报错信息里
+    # 没有任何东西告诉你其实可以走 call_method（#262，和 #130 同一类缺口）。
+    #
+    # 下面每一个的取舍都来自 2026-09-09 对实盘桥（国金大 QMT）的逐个实测，
+    # 结果见 docs/RPC_API_REFERENCE.md 3.12。**凡是对任何代码都答同一个
+    # 空值的，这里不给假答案**：一个恒为 0/None 的返回值看不见，
+    # AttributeError 看得见（get_stock_type 就是这么定的）。
+    #
+    # 「恒为空」这个判据本身要小心用：get_bvol 一度被判成「对任何代码都答
+    # 0」而拒绝转发，实际是取样全是收盘后只剩 15:00 集合竞价的股票 —— 换
+    # 逆回购（204001.SH 1506858 / 131810.SZ 2404676）和 511990.SH（22883）
+    # 立刻有值。分母取错就会把一个能用的方法判死，所以现在它照常转发。
+    # ------------------------------------------------------------------
+
+    def get_instrument(self, stock_code):
+        """RPC 侧的方法名。`get_instrument_detail` / `get_instrumentdetail`
+        是它的别名，三个名字回同一份合约详情。"""
+        return self.get_instrument_detail(stock_code)
+
+    def get_ticks(self, code_list, timeout_seconds=None, types=None):
+        """RPC 侧的方法名；MiniQMT 那边叫 `get_full_tick`，二者等价。"""
+        return self.get_full_tick(code_list, timeout_seconds=timeout_seconds,
+                                  types=types)
+
+    def get_last_close(self, stock):
+        """昨收价。实测 600519.SH -> 1309.3，与 get_instrument_detail 的
+        PreClose 一致。"""
+        return self._call("get_last_close", stock=stock)
+
+    def get_last_volume(self, stock):
+        """最新**流通股本**，不是「昨天的成交量」。
+
+        官方释义就是「获取最新流通股本」，名字具有误导性。实测
+        600519.SH -> 1250081601.0、601398.SH -> 269612212539.0，与
+        get_instrument_detail 的 FloatVolume 逐位相同；同一天 601398.SH 的
+        成交量是 2154432 手，差了五个数量级。要成交量请读 get_ticks()。
+        """
+        return self._call("get_last_volume", stock=stock)
+
+    def get_open_date(self, stock):
+        """上市日期，int yyyymmdd。
+
+        实测 600519.SH -> 20010827、510300.SH -> 20120528，与
+        get_instrument_detail 的 OpenDate 一致。
+        """
+        return self._call("get_open_date", stock=stock)
+
+    def get_contract_expire_date(self, stock):
+        """到期日。**返回字符串**，不是 int。
+
+        实测股票/ETF -> '99999999'（无到期日），终端里没有的合约 -> '0'。
+        get_instrument_detail 的 ExpireDate 是同一个值的 int 版，需要数字
+        比较时用那个。
+        """
+        return self._call("get_contract_expire_date", stock=stock)
+
+    def get_float_caps(self, stockcode):
+        """流通**股本**（股数），不是流通市值。
+
+        实测和 get_last_volume 逐位相同（601398.SH -> 269612212539，
+        = get_instrument_detail 的 FloatVolume）。同一天该股昨收 7.94 元，
+        流通市值应是 2 万亿量级 —— 按「市值」用会差一个价格的倍数。
+        """
+        return self._call("get_float_caps", stockcode=stockcode)
+
+    def get_total_share(self, stockcode):
+        """总股本。实测 601398.SH -> 356406257089，确实和流通股本
+        （269612212539）不同，= get_instrument_detail 的 TotalVolume。"""
+        return self._call("get_total_share", stockcode=stockcode)
+
+    def get_weight_in_index(self, mtkindexcode, stockcode):
+        """某只股票在某指数中的绝对权重，**单位是 %**。
+
+        实测 ('000300.SH','600519.SH') -> 5.801、('000016.SH','600519.SH')
+        -> 16.232、('000905.SH','600519.SH') -> 0.0（不是成分股）—— 会随
+        指数和个股变化，不是常数。
+        """
+        return self._call("get_weight_in_index", mtkindexcode=mtkindexcode,
+                          stockcode=stockcode)
+
+    def get_risk_free_rate(self, index=-1):
+        """无风险利率（官方说是十年期国债收益率 CGB10Y），单位 %。
+
+        实测这台终端恒返回 3.5，`index`（K 线索引号）传 -1/0/1/100/5000
+        都一样 —— 也就是说它给的是终端里的一个设置值，不是随 K 线走的
+        CGB10Y 序列。拿来做期权定价的常数可以，当历史利率序列用不行。
+        """
+        return self._call("get_risk_free_rate", index=index)
+
+    def get_svol(self, stock):
+        """内盘成交量 —— **盘中窗口量，不是当日累计内盘**。
+
+        和配对的 get_bvol 一起看才读得懂（2026-09-09 收盘后实测）：
+
+        - 尾盘只剩 15:00 收盘集合竞价的代码上，`svol + bvol` **恰好等于最后
+          一根 1 分钟 K 线的成交量**：601398.SH 32586+0、510300.SH 59408+0、
+          000001.SZ 5177+0、511990.SH 0+22883，逐位等于
+          get_market_data_ex(['volume'], period='1m') 的末根。集合竞价一个
+          价位撮合、没有主动方，所以整根落进单侧、另一侧为 0 —— 落哪一侧
+          不固定（511990.SH 落在外盘）。
+        - 连续交易到 15:30 的逆回购上，两侧都非零，但 `svol + bvol` 既不是
+          末根 1 分钟 K 线也不是当日成交量：204001.SH 43226876+1506858
+          =44733734，末根 5565745，当日 2093850077 —— 大约是尾盘几分钟的量，
+          **具体窗口没能定死**。
+
+        所以：`svol + bvol ≠ 日成交量`，两个都不是当日内外盘。要当日口径请
+        自己按 tick 或 K 线累计。
+        """
+        return self._call("get_svol", stock=stock)
+
+    def get_bvol(self, stock):
+        """外盘成交量 —— 语义同 get_svol，见那边的实测记录。
+
+        它**不是**恒 0：实测 204001.SH -> 1506858、131810.SZ -> 2404676、
+        511990.SH -> 22883。股票在收盘后答 0，是因为那时最后一根 K 线是
+        15:00 集合竞价、整根都落进内盘，不是这个方法答不了。
+        """
+        return self._call("get_bvol", stock=stock)
+
+    def get_turn_over_rate(self, stockcode):
+        """换手率（单值版）—— 这台终端上答不了，直接报错。
+
+        实测对 600519.SH / 000001.SZ / 510300.SH / 000300.SH / 601398.SH
+        全部返回 None，换代码格式（600519 / SH600519）也一样，收盘后重测
+        仍是 None（不是「非交易时段才空」）。区间版 get_turnover_rate 在同
+        一次运行里返回空 DataFrame —— 而它按官方文档需要先下载财务数据
+        （股本）与日线数据，本终端两样都没下过，所以没能区分「stub 坏了」
+        和「缺基础数据」。
+        """
+        raise NotImplementedError(
+            "get_turn_over_rate is not usable on this Big QMT terminal: the "
+            "server-side ContextInfo.get_turn_over_rate stub returns None for "
+            "every code (verified live against a stock, an ETF, an index and "
+            "several code formats, after the close). The range version "
+            "get_turnover_rate answered an empty DataFrame in the same run, "
+            "and it documents a precondition this terminal has not met: the "
+            "financial data (share capital) and daily bars must be downloaded "
+            "first (download_financial_data / download_history_data). If yours "
+            "has them, call it explicitly with "
+            "xtdata.call_method(\"get_turn_over_rate\", stockcode=...). "
+            "Otherwise derive it: get_ticks()[code]['pvolume'] / "
+            "get_last_volume(code) -- pvolume is in shares like the float "
+            "share count, while ['volume'] is in lots and would come out 100x "
+            "too small."
+        )
+
+    # int32 最大值。合约乘数不可能是这个数，它是「没有值」的哨兵。
+    CONTRACT_MULTIPLIER_SENTINEL = 2147483647
+
+    def get_contract_multiplier(self, stockcode):
+        """合约乘数。**答案是哨兵值时报错，不往外递。**
+
+        实测这台终端对股票 / ETF / 期权 / 期货代码一律返回 2147483647
+        （int32 上限，即「没有值」），而它自己也没有期货行情：
+        get_instrument('IF2612.IF') / ('cu2610.SF') 都是 {}，
+        get_his_contract_list('IF') 是 0 条。
+
+        把 2147483647 当乘数用会把下单金额算错 20 亿倍，所以这里回读结果、
+        对上哨兵就报错。有期货数据的终端能正常返回时照常放行。
+        """
+        answer = self._call("get_contract_multiplier", stockcode=stockcode)
+        try:
+            is_sentinel = int(answer) == self.CONTRACT_MULTIPLIER_SENTINEL
+        except (TypeError, ValueError):
+            is_sentinel = False
+        if is_sentinel:
+            raise NotImplementedError(
+                "get_contract_multiplier(%r) answered %s -- the int32 sentinel "
+                "this terminal returns when it has no multiplier for the code "
+                "(verified live: stocks, ETFs, options and futures codes all "
+                "answer it, and the same terminal has no futures data at all: "
+                "get_instrument('IF2612.IF') is {} and get_his_contract_list"
+                "('IF') is empty). Using it as a multiplier would misprice an "
+                "order by a factor of 2e9, so it is not returned. Check the "
+                "futures market data is subscribed, or read "
+                "get_instrument_detail(code)['VolumeMultiple'] instead."
+                % (stockcode, self.CONTRACT_MULTIPLIER_SENTINEL))
+        return answer
 
     def get_close_price(self, market, stock_code, real_timetag, period=86400000, divid_type=0):
         return self._call(
@@ -2826,6 +4302,13 @@ class BigQmtXtTrader:
         # order id -- never holds up the next submit (issue #181).
         self._async_callback_queue = _queue.Queue()
         self._async_callback_thread = None
+        # Async cancel submission — same worker-queue pattern as async orders.
+        # cancel_order_stock_async used to call the blocking RPC inline, which
+        # made 15 cancels take ~30s.  Now the cancel runs on a worker thread
+        # and batches a backlog into one RPC.
+        self._async_cancel_queue = _queue.Queue()
+        self._async_cancel_thread = None
+        # Reuses _async_order_lock for start-up serialisation.
         # int -> 合同编号 for ids handed out as OrderId (issue #113).
         self._order_sys_ids = _OrderedDict()
         # on_account_status used to report a hardcoded "STOCK" even for a
@@ -2833,7 +4316,93 @@ class BigQmtXtTrader:
         # client's StockAccount(..., "CREDIT") never travels -- so prefer what
         # ping reports, fall back to what the caller declared.
         self._server_account_type = ""
+        self._server_account_types = []
         self._declared_account_type = ""
+        # Set once the exec-event listener is really subscribed; start() waits
+        # on it instead of sleeping blind. Never cleared on reconnect rounds --
+        # start() only waits once, and a resubscribe does not un-start it.
+        self._event_ready = threading.Event()
+        try:
+            self.event_listener_ready_timeout = float(
+                os.environ.get("BIGQMT_EVENT_READY_TIMEOUT") or 1.0)
+        except (TypeError, ValueError):
+            self.event_listener_ready_timeout = 1.0
+        # Account-query cache fallback (#243). OFF by default: a failed
+        # POSITION/ASSET query must reach the caller, the way it already does
+        # on every non-redis transport. Serving the last redis snapshot
+        # instead turns "the query failed" into "here is what you own",
+        # which is the one answer a strategy must never be given wrongly.
+        #
+        # Deliberately NOT tied to local_cache_enabled: that key is the
+        # client-side *market data* cache. Two different caches, two
+        # switches -- conflating them is what made local_cache_enabled=False
+        # look like it should have disabled this and it did not.
+        # Read the config as handed to us: BigQmtRpcClient normalises its own
+        # copy and drops keys it does not know, so self.client.redis_config
+        # cannot be the source here.
+        cache_config = dict((load_client_config() or {}).get("redis_config") or {})
+        cache_config.update(dict(redis_config or {}))
+        self.account_cache_fallback = _bool_value(
+            cache_config.get("account_cache_fallback"),
+            _env_bool("BIGQMT_ACCOUNT_CACHE_FALLBACK", False),
+        )
+        try:
+            self.account_cache_max_age_seconds = float(
+                cache_config.get("account_cache_max_age_seconds")
+                or os.environ.get("BIGQMT_ACCOUNT_CACHE_MAX_AGE") or 30.0)
+        except (TypeError, ValueError):
+            self.account_cache_max_age_seconds = 30.0
+
+    def _snapshot_age_seconds(self, snapshot):
+        """How old the cached snapshot is, or None when it does not say.
+
+        A snapshot that carries no ``updated_at`` is treated as unusable
+        rather than fresh: the whole point of the bound is refusing to answer
+        with facts we cannot date.
+        """
+        stamp = (snapshot or {}).get("updated_at")
+        if not stamp:
+            return None
+        text = str(stamp).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                parsed = _dt.datetime.strptime(text.split("+")[0].strip(), fmt)
+            except ValueError:
+                continue
+            return max(0.0, (_dt.datetime.now() - parsed).total_seconds())
+        try:  # epoch seconds
+            return max(0.0, time.time() - float(text))
+        except (TypeError, ValueError):
+            return None
+
+    def _account_cache_usable(self, account_id, what):
+        """May we answer `what` from the cached snapshot at all?
+
+        Returns the snapshot when the fallback is switched on AND the data is
+        dated AND it is inside the age bound. Anything else -> None, and the
+        caller re-raises the original error.
+        """
+        if not self.account_cache_fallback:
+            return None
+        if not self._redis_cache_enabled():
+            return None
+        snapshot = self._cached_position_snapshot(account_id)
+        if not snapshot:
+            return None
+        age = self._snapshot_age_seconds(snapshot)
+        if age is None:
+            log.warning(
+                "%s: 拒绝用缓存回答 —— 快照没有 updated_at，无法判断新旧", what)
+            return None
+        if age > self.account_cache_max_age_seconds:
+            log.warning(
+                "%s: 拒绝用缓存回答 —— 快照已 %.1fs 前（上限 %.1fs）",
+                what, age, self.account_cache_max_age_seconds)
+            return None
+        log.warning(
+            "%s: 原生查询失败，改用 %.1fs 前的 redis 缓存作答（"
+            "account_cache_fallback=True 打开的行为）", what, age)
+        return snapshot
 
     def _cached_position_snapshot(self, account_id):
         key = "bigqmt:positions:%s" % str(account_id or self.client.account_id or "")
@@ -2880,14 +4449,25 @@ class BigQmtXtTrader:
         return 0
 
     def connect(self):
-        if self.client.account_id:
-            pong = self.client.call("ping")
-            self._note_server_account_type(pong)
-            mismatch = warn_on_version_mismatch(pong)
-            if mismatch and auto_sync_enabled():
-                self.sync_deployment()
-        self._fire_account_status()
-        return 0
+        try:
+            if self.client.account_id:
+                pong = self.client.call("ping")
+                self._note_server_account_type(pong)
+                mismatch = warn_on_version_mismatch(pong)
+                if mismatch and auto_sync_enabled():
+                    self.sync_deployment()
+            self._fire_account_status()
+            return 0
+        except Exception:
+            # connect 失败必须拆掉 start() 拉起的事件监听线程。否则它持有的
+            # Redis pubsub 订阅(每实例 4 个 exec 事件频道)随丢弃的实例永久
+            # 留在服务端: 调用方重连风暴每次重试泄漏一个, 实测单日 8000+ 个
+            # subscribe 连接, 逼近 maxclients 后整个 Redis 拒绝新连接。
+            try:
+                self.stop()
+            except Exception:
+                log.exception("connect failed and event listener teardown failed")
+            raise
 
     def sync_deployment(self, dry_run=False):
         """Push this client's package into the QMT python directory.
@@ -2939,7 +4519,26 @@ class BigQmtXtTrader:
         # to the account's channels within ~1s if the account changed.
         self._start_event_listener()
         self._fire_account_status()
+        # Wait for the exec-event listener to actually be subscribed, rather
+        # than sleeping a fixed second and hoping (#247 shipped time.sleep(1)
+        # here with "原因不明"). The race is real: _start_event_listener starts
+        # a daemon thread and returns, so events published between subscribe()
+        # and the pubsub.subscribe() inside that thread are lost -- a caller
+        # that orders immediately after subscribe() can miss its own fill
+        # callback. start() has the same shape but MiniQMT callers reach events
+        # through subscribe(), which is where the sleep was.
+        #
+        # Bounded by the same 1s the sleep cost, so the worst case is no worse
+        # than before, while the normal case (subscribed in a few ms) no longer
+        # pays for it. BIGQMT_EVENT_READY_TIMEOUT=0 disables the wait.
+        self._await_event_listener()
         return 0
+
+    def _await_event_listener(self):
+        timeout = self.event_listener_ready_timeout
+        if timeout <= 0:
+            return False
+        return self._event_ready.wait(timeout)
 
     def stop(self):
         # Drain first: orders already queued must go out before teardown.
@@ -2965,10 +4564,13 @@ class BigQmtXtTrader:
         """Remember what the deployment says it trades as."""
         try:
             reported = str((pong or {}).get("account_type") or "").strip().upper()
+            listed = [str(t or "").strip().upper()
+                      for t in ((pong or {}).get("account_types") or [])]
         except Exception:
             return
         if reported:
             self._server_account_type = reported
+            self._server_account_types = [t for t in listed if t]
             self._warn_on_account_type_mismatch()
 
     def _warn_on_account_type_mismatch(self):
@@ -2981,6 +4583,10 @@ class BigQmtXtTrader:
         server = self._server_account_type
         declared = self._declared_account_type
         if not server or not declared or server == declared:
+            return
+        # A deployment configured for several types (港股通 on a stock
+        # account) answers each request as the type its StockAccount named.
+        if declared in (getattr(self, "_server_account_types", None) or []):
             return
         log.warning(
             "account_type mismatch: this client asked for %s but the QMT "
@@ -3027,13 +4633,17 @@ class BigQmtXtTrader:
         channel = None
         account_id = str(self.client.account_id or "")
         try:
-            channel = self._build_quote_push_channel()
+            channel = _build_quote_push_channel(self.client)
             channel.start_subscriber(topics, self._on_push_exec_event)
+            self._event_ready.set()          # see the redis path (#247)
             while self._event_running:
                 if str(self.client.account_id or "") != account_id:
                     return       # account changed -> rebuild against the new address
                 time.sleep(0.5)
         except Exception:
+            # 静默重试养大了 #366（方法不存在 -> AttributeError -> 永远收不到
+            # 回调，外面什么都看不见）。失败必须留痕。
+            log.exception("exec event push-channel round failed; retrying")
             time.sleep(1.0)
         finally:
             if channel is not None:
@@ -3118,6 +4728,8 @@ class BigQmtXtTrader:
                 order_error_channel(account_id),
                 cancel_error_channel(account_id),
             )
+            # Subscribed for real -- release start()'s bounded wait (#247).
+            self._event_ready.set()
             while self._event_running:
                 if str(self.client.account_id or "") != account_id:
                     return  # account changed -> reconnect and resubscribe
@@ -3177,11 +4789,18 @@ class BigQmtXtTrader:
                 _sysid = str(event.get("order_sys_id") or "")
                 callback.on_order_error(
                     CompatObject(
+                        # xttype.XtOrderError names both, and account_id
+                        # was already resolved at the top of this method.
+                        account_id=account_id,
+                        account_type=self._account_type_value(event),
                         error_id=event.get("error_id"),
                         error_msg=event.get("error_msg") or "",
                         order_sysid=_sysid,       # MiniQMT 规范名 (issue #65)
                         order_sys_id=_sysid,      # 兼容别名
-                        order_id=_sysid,
+                        # order_id 必须和 on_stock_order/order_stock 同型
+                        # (OrderId int 子类)，否则调用方拿到的废单号对不上
+                        # 下单返回值，也没法拿它撤单 (#363)。
+                        order_id=self._order_object_id(_sysid),
                         stock_code=event.get("stock_code") or "",
                         order_remark=str(
                             event.get("order_remark") or event.get("remark")
@@ -3195,11 +4814,14 @@ class BigQmtXtTrader:
                 _sysid = str(event.get("order_sys_id") or "")
                 callback.on_cancel_error(
                     CompatObject(
+                        account_id=account_id,
+                        account_type=self._account_type_value(event),
+                        market=_market_of(event.get("stock_code")),
                         error_id=event.get("error_id"),
                         error_msg=event.get("error_msg") or "",
                         order_sysid=_sysid,       # MiniQMT 规范名 (issue #65)
                         order_sys_id=_sysid,
-                        order_id=_sysid,
+                        order_id=self._order_object_id(_sysid),  # 同 #363
                         stock_code=event.get("stock_code") or "",
                         order_remark=str(
                             event.get("order_remark") or event.get("remark")
@@ -3222,19 +4844,24 @@ class BigQmtXtTrader:
     def query_stock_asset(self, account):
         account_id = _account_id(account, self.client.account_id)
         try:
-            data = self.client.call("query_stock_asset", {"account_id": account_id}, account_id=account_id) or {}
+            data = self.client.call("query_stock_asset", _with_account_type({"account_id": account_id}, account),
+                                    account_id=account_id) or {}
         except Exception:
-            if not self._redis_cache_enabled():
+            # #243: default is to let the failure through. Only an explicit
+            # account_cache_fallback, with a dated and fresh snapshot, answers
+            # from cache -- and it says so in the log when it does.
+            if self._account_cache_usable(account_id, "query_stock_asset") is None:
                 raise
             data = self._cached_asset(account_id)
             if not data:
                 raise
         if (
-            self._redis_cache_enabled()
-            and data.get("cash") is None
+            data.get("cash") is None
             and data.get("total_asset") is None
+            and self._account_cache_usable(account_id, "query_stock_asset(empty)") is not None
         ):
             data = self._cached_asset(account_id) or data
+        fetch_balance = _safe_float(data.get("fetch_balance"), None)
         cash = data.get("cash")
         total_asset = data.get("total_asset")
         frozen_cash = data.get("frozen_cash")
@@ -3249,8 +4876,13 @@ class BigQmtXtTrader:
                 market_value -= _safe_float(frozen_cash)
         return CompatObject(
             account_id=account_id,
+            # xttype.XtAsset carries it. #133 added account_type to
+            # order/trade/position; the asset object was missed.
+            account_type=self._account_type_value(),
             cash=_safe_float(cash, 0.0) if cash is not None else None,
             available_cash=_safe_float(cash, 0.0) if cash is not None else None,
+            fetch_balance=fetch_balance,
+            m_dFetchBalance=fetch_balance,
             # MiniQMT's XtAsset always exposes frozen_cash, so default to 0.0
             # rather than None: callers do arithmetic on it.
             frozen_cash=_safe_float(frozen_cash, 0.0) if frozen_cash is not None else 0.0,
@@ -3258,6 +4890,7 @@ class BigQmtXtTrader:
             market_value=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
             # ===== 原生 xtquant 字段名别名（兼容 m_ 前缀访问）=====
             m_strAccountID=account_id,
+            m_nAccountType=self._account_type_value(),
             m_dCash=_safe_float(cash, 0.0) if cash is not None else None,
             m_dAvailableCash=_safe_float(cash, 0.0) if cash is not None else None,
             m_dFrozenCash=_safe_float(frozen_cash, 0.0) if frozen_cash is not None else 0.0,
@@ -3322,9 +4955,10 @@ class BigQmtXtTrader:
     def query_stock_positions(self, account):
         account_id = _account_id(account, self.client.account_id)
         try:
-            data = self.client.call("query_stock_positions", {"account_id": account_id}, account_id=account_id) or {}
+            data = self.client.call("query_stock_positions", _with_account_type({"account_id": account_id}, account),
+                                    account_id=account_id) or {}
         except Exception:
-            if not self._redis_cache_enabled():
+            if self._account_cache_usable(account_id, "query_stock_positions") is None:
                 raise
             data = self._cached_positions(account_id)
             if not data:
@@ -3340,7 +4974,7 @@ class BigQmtXtTrader:
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "query_position_statistics",
-            {"account_id": account_id},
+            _with_account_type({"account_id": account_id}, account),
             account_id=account_id,
         ) or {}
         return [self._position_statistics_object(account_id, item) for item in _as_list(data)]
@@ -3449,11 +5083,11 @@ class BigQmtXtTrader:
         try:
             data = self.client.call(
                 "query_stock_position",
-                {"account_id": account_id, "stock_code": stock_code},
+                _with_account_type({"account_id": account_id, "stock_code": stock_code}, account),
                 account_id=account_id,
             )
         except Exception:
-            if not self._redis_cache_enabled():
+            if self._account_cache_usable(account_id, "query_stock_position") is None:
                 raise
             normalized = str(stock_code or "").strip().upper()
             data = None
@@ -3476,11 +5110,11 @@ class BigQmtXtTrader:
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "query_stock_orders",
-            {
+            _with_account_type({
                 "account_id": account_id,
                 "cancelable_only": bool(cancelable_only),
                 "strategy_name": strategy_name,
-            },
+            }, account),
             account_id=account_id,
         ) or []
         return [self._order_from_dict(account_id, item) for item in _as_list(data)]
@@ -3499,7 +5133,7 @@ class BigQmtXtTrader:
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "query_stock_trades",
-            {"account_id": account_id, "strategy_name": strategy_name},
+            _with_account_type({"account_id": account_id, "strategy_name": strategy_name}, account),
             account_id=account_id,
         ) or []
         return [self._trade_from_dict(account_id, item) for item in _as_list(data)]
@@ -3516,7 +5150,7 @@ class BigQmtXtTrader:
             -> {'ORDER': {'rows': 15, 'attributes': [...], 'error': ''}, ...}
         """
         account_id = _account_id(account, self.client.account_id)
-        params = {"account_id": account_id}
+        params = _with_account_type({"account_id": account_id}, account)
         if detail_types:
             params["detail_types"] = list(detail_types)
         return self.client.call("describe_trade_detail_fields", params,
@@ -3555,11 +5189,11 @@ class BigQmtXtTrader:
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "query_execution_snapshot",
-            {
+            _with_account_type({
                 "account_id": account_id,
                 "order_strategy_name": order_strategy_name,
                 "trade_strategy_name": trade_strategy_name,
-            },
+            }, account),
             account_id=account_id,
         ) or {}
         result = dict(data) if isinstance(data, dict) else {}
@@ -3658,7 +5292,7 @@ class BigQmtXtTrader:
         user_order_id = str(order_remark or "").strip()
         if not user_order_id:
             user_order_id = "bqrpc:%s:%s" % (int(time.time() * 1000), uuid.uuid4().hex[:10])
-        payload = {
+        payload = _with_account_type({
             "account_id": account_id,
             "stock_code": stock_code,
             "order_type": order_type,
@@ -3667,16 +5301,96 @@ class BigQmtXtTrader:
             "price": price,
             "strategy_name": strategy_name,
             "order_remark": user_order_id,
-        }
+        }, account)
         if not wait_settlement:
             payload["wait_settlement"] = False
+        tracked = getattr(self.client, "call_tracked", None)
+        if tracked is None:
+            # A client that cannot name its request (a test double): the
+            # pre-#303 contract, where a timeout is honestly unknown.
+            try:
+                return self.client.call("order_stock", payload, account_id=account_id) or {}
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    "order_stock rpc timeout; user_order_id=%s. Query orders/trades before retrying to avoid duplicate orders. %s"
+                    % (user_order_id, exc)
+                )
+        request_id = uuid.uuid4().hex
         try:
-            return self.client.call("order_stock", payload, account_id=account_id) or {}
+            return tracked("order_stock", payload, account_id=account_id,
+                           request_id=request_id) or {}
         except TimeoutError as exc:
+            return self._order_stock_after_timeout(request_id, account_id, user_order_id, exc)
+
+    # After a timed-out order_stock: how long to keep asking the server what
+    # became of it, and how often. Covers the server's own settlement wait
+    # (order_settle_timeout_seconds, 3s) with room to spare.
+    ORDER_TIMEOUT_FOLLOWUP_SECONDS = 5.0
+    ORDER_TIMEOUT_FOLLOWUP_INTERVAL_SECONDS = 0.5
+
+    def _order_stock_after_timeout(self, request_id, account_id, user_order_id, exc):
+        """Turn "timed out, state unknown" into an answer (#303).
+
+        Under a burst the bridge runs orders one at a time, so a request can
+        outlive its caller's patience. The server keeps every order request's
+        outcome for ten minutes, and ``get_request_outcome`` reads it on the
+        listener thread -- reachable even while the adjust thread is busy.
+
+            settled     the reply we missed: return it as if it had arrived
+            refused     past its deadline before dispatch: NOT placed
+            unknown     never picked up: it will be refused when it is (it is
+                        past its deadline), so NOT placed either
+            dispatched  passorder ran, the id is still being looked up: keep
+                        asking for a few seconds, then say so
+
+        A server without the method (older than #303) makes the query fail;
+        that falls through to the old message, which was honest about not
+        knowing.
+        """
+        deadline = time.time() + float(self.ORDER_TIMEOUT_FOLLOWUP_SECONDS)
+        last_state = None
+        while True:
+            try:
+                outcome = self.client.call(
+                    "get_request_outcome", {"request_id": request_id},
+                    account_id=account_id, timeout_seconds=2.0) or {}
+            except Exception:
+                outcome = None
+            if not isinstance(outcome, dict) or "state" not in outcome:
+                break
+            last_state = str(outcome.get("state") or "")
+            if last_state == "settled":
+                response = outcome.get("response") or {}
+                if not response.get("ok"):
+                    raise RpcServerRepliedError(
+                        response.get("error") or "Big QMT RPC failed: order_stock")
+                server_error = str(response.get("server_error") or "")
+                if server_error:
+                    raise RpcServerRepliedError(
+                        "Big QMT order_stock server_error: %s" % server_error)
+                return _restore_jsonable(response.get("data")) or {}
+            if last_state in ("refused", "unknown"):
+                raise TimeoutError(
+                    "order_stock rpc timeout; user_order_id=%s. The bridge did NOT place "
+                    "this order (%s before dispatch): safe to retry, ideally with less "
+                    "concurrency or a longer timeout -- orders run one at a time on the "
+                    "QMT strategy thread. %s"
+                    % (user_order_id,
+                       "refused as expired" if last_state == "refused" else "never picked up",
+                       exc))
+            if time.time() >= deadline:
+                break
+            time.sleep(self.ORDER_TIMEOUT_FOLLOWUP_INTERVAL_SECONDS)
+        if last_state in ("dispatched", "dispatching"):
             raise TimeoutError(
-                "order_stock rpc timeout; user_order_id=%s. Query orders/trades before retrying to avoid duplicate orders. %s"
-                % (user_order_id, exc)
-            )
+                "order_stock rpc timeout; user_order_id=%s. passorder DID run for this "
+                "order but QMT had not assigned its id when we stopped waiting: it is "
+                "live. Find it by remark before retrying, or a retry is a duplicate. %s"
+                % (user_order_id, exc))
+        raise TimeoutError(
+            "order_stock rpc timeout; user_order_id=%s. Query orders/trades before retrying to avoid duplicate orders. %s"
+            % (user_order_id, exc)
+        )
 
     def _async_order_worker(self):
         """Drain queued async orders; never fires user callbacks itself.
@@ -3799,6 +5513,223 @@ class BigQmtXtTrader:
             pass
 
     # ------------------------------------------------------------------
+    # Async cancel — worker-queue pattern mirroring async orders.
+    # cancel_order_stock_async used to block on the RPC for each cancel;
+    # now it enqueues and returns immediately.  The worker drains the
+    # queue and batches a backlog into one cancel_orders_batch RPC.
+    # ------------------------------------------------------------------
+
+    def _async_cancel_worker(self):
+        """Drain queued async cancels; batches when backlog allows."""
+        while True:
+            job = self._async_cancel_queue.get()
+            if job is None:
+                self._async_cancel_queue.task_done()
+                return
+            jobs = [job]
+            stopping = False
+            while len(jobs) < self.ASYNC_CANCEL_BATCH_MAX:
+                try:
+                    extra = self._async_cancel_queue.get_nowait()
+                except _queue.Empty:
+                    break
+                if extra is None:
+                    stopping = True
+                    self._async_cancel_queue.task_done()
+                    break
+                jobs.append(extra)
+            try:
+                self._submit_async_cancel_jobs(jobs)
+            except Exception:
+                log.exception("async cancel submit failed for %d job(s)", len(jobs))
+            finally:
+                for _ in jobs:
+                    self._async_cancel_queue.task_done()
+            if stopping:
+                return
+
+    def _ensure_async_cancel_worker(self):
+        with self._async_order_lock:
+            if self._async_callback_thread is None or not self._async_callback_thread.is_alive():
+                self._async_callback_thread = threading.Thread(
+                    target=self._async_callback_worker,
+                    name="bigqmt-async-callback", daemon=True,
+                )
+                self._async_callback_thread.start()
+            if self._async_cancel_thread is not None and self._async_cancel_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._async_cancel_worker,
+                name="bigqmt-async-cancel", daemon=True,
+            )
+            self._async_cancel_thread = thread
+            thread.start()
+
+    def _submit_async_cancel_jobs(self, jobs):
+        """Submit cancels one-at-a-time or batched by account."""
+        if len(jobs) < self.ASYNC_CANCEL_BATCH_MIN:
+            self._submit_async_cancel_single(jobs[0])
+            return
+        groups = {}
+        for job in jobs:
+            seq, args, kwargs = job
+            account_id = _account_id(args[0], self.client.account_id)
+            # By id AND type: one stock account's STOCK and HUGANGTONG
+            # cancels are different books on the server.
+            groups.setdefault((account_id, _account_type_param(args[0])), []).append(job)
+        for (account_id, _type), group in groups.items():
+            if len(group) < self.ASYNC_CANCEL_BATCH_MIN:
+                for job in group:
+                    self._submit_async_cancel_single(job)
+            else:
+                self._submit_async_cancel_batch(account_id, group)
+
+    def _submit_async_cancel_single(self, job):
+        """One cancel on the worker thread; enqueue its callback."""
+        seq, args, kwargs = job
+        account = args[0]
+        order_id = args[1] if len(args) > 1 else kwargs.get("order_id", "")
+        market = args[2] if len(args) > 2 else kwargs.get("market", "")
+        account_id = _account_id(account, self.client.account_id)
+        try:
+            data = self.client.call(
+                "cancel_order_stock_sysid",
+                _with_account_type({
+                    "account_id": account_id,
+                    "market": market,
+                    "order_sysid": self._resolve_order_sys_id(order_id),
+                }, account),
+                account_id=account_id,
+            ) or {}
+            ok = bool(data.get("success", data))
+        except Exception as exc:
+            self._enqueue_async_outcome({
+                "kind": "cancel_error", "seq": seq,
+                "order_id": order_id, "market": market,
+                "error_id": getattr(exc, "errno", 0),
+                "error_msg": str(exc),
+            })
+            return
+        self._enqueue_async_outcome({
+            "kind": "cancel_response", "seq": seq,
+            "order_id": order_id, "market": market,
+            "success": ok,
+        })
+
+    def _submit_async_cancel_batch(self, account_id, group):
+        """N cancels in one RPC; one callback per item.
+
+        Failure taxonomy mirrors the order batch (#195): a batch the server
+        REFUSED (answered with an error -- the handler raises before its
+        per-item loop, so nothing ran) or answered empty is safe to retry as
+        singles; a timeout/transport failure means the cancels may be running
+        and retrying would double-cancel -- report unknown-outcome per item
+        instead."""
+        payload = []
+        account = group[0][1][0] if group and group[0][1] else None
+        for seq, args, kwargs in group:
+            order_id = args[1] if len(args) > 1 else kwargs.get("order_id", "")
+            market = args[2] if len(args) > 2 else kwargs.get("market", "")
+            payload.append({
+                "account_id": account_id,
+                "order_sysid": self._resolve_order_sys_id(order_id),
+                "market": market,
+            })
+        try:
+            results = self.client.call(
+                "cancel_order_stock_batch",
+                _with_account_type({"account_id": account_id, "items": payload}, account),
+                account_id=account_id,
+            ) or []
+        except RpcServerRepliedError as exc:
+            log.warning("cancel batch of %d refused by the server (%s); "
+                        "submitting one at a time", len(group), exc)
+            for job in group:
+                try:
+                    self._submit_async_cancel_single(job)
+                except Exception:
+                    log.exception("async cancel failed after batch refusal")
+            return
+        except Exception as exc:
+            log.exception("cancel batch of %d outcome unknown; NOT resubmitting",
+                          len(group))
+            for seq, args, kwargs in group:
+                order_id = args[1] if len(args) > 1 else kwargs.get("order_id", "")
+                market = args[2] if len(args) > 2 else kwargs.get("market", "")
+                self._enqueue_async_outcome({
+                    "kind": "cancel_error", "seq": seq,
+                    "order_id": order_id, "market": market,
+                    "error_id": -4,
+                    "error_msg": ("cancel batch outcome unknown (%s: %s); the "
+                                  "cancels MAY BE RUNNING -- check the order "
+                                  "status before retrying"
+                                  % (exc.__class__.__name__, exc)),
+                })
+            return
+        if not results:
+            # The server appends one result per item, so nothing back means the
+            # batch never ran -- not that every cancel failed. Fall back to
+            # singles, which is what would have happened anyway.
+            log.warning("cancel batch of %d returned no results; submitting "
+                        "one at a time", len(group))
+            for job in group:
+                try:
+                    self._submit_async_cancel_single(job)
+                except Exception:
+                    log.exception("async cancel failed after empty batch")
+            return
+        by_index = {}
+        for position, entry in enumerate(results):
+            if isinstance(entry, dict):
+                by_index[int(entry.get("index", position))] = entry
+        for index, (seq, args, kwargs) in enumerate(group):
+            order_id = args[1] if len(args) > 1 else kwargs.get("order_id", "")
+            market = args[2] if len(args) > 2 else kwargs.get("market", "")
+            entry = by_index.get(index) or {}
+            if entry.get("success", False):
+                self._enqueue_async_outcome({
+                    "kind": "cancel_response", "seq": seq,
+                    "order_id": order_id, "market": market,
+                    "success": True,
+                })
+            else:
+                self._enqueue_async_outcome({
+                    "kind": "cancel_error", "seq": seq,
+                    "order_id": order_id, "market": market,
+                    "error_id": int(entry.get("code") or -1),
+                    "error_msg": str(entry.get("error")
+                                     or entry.get("message")
+                                     or "cancel batch item failed"),
+                })
+
+    def cancel_order_stock_batch(self, account, cancels, timeout_seconds=None):
+        """Cancel N orders in one RPC.
+
+        Each item in *cancels* is a dict with ``order_sysid`` (or
+        ``order_sys_id`` / ``order_id``) and optional ``market``.
+        Returns a list of per-item result dicts.
+        """
+        account_id = _account_id(account, self.client.account_id)
+        payload = []
+        for item in cancels or []:
+            entry = dict(item or {})
+            entry.setdefault("account_id", account_id)
+            payload.append(entry)
+        params = _with_account_type({"account_id": account_id, "items": payload}, account)
+        if timeout_seconds is None:
+            timeout_seconds = max(
+                float(getattr(self.client, "timeout_seconds",
+                              DEFAULT_RPC_TIMEOUT_SECONDS)),
+                2.0 + 0.5 * len(payload),
+            )
+        return self.client.call(
+            "cancel_order_stock_batch",
+            params,
+            account_id=account_id,
+            timeout_seconds=timeout_seconds,
+        ) or []
+
+    # ------------------------------------------------------------------
     # issue #51 A: 同一笔委托的 async_response 必须先于它的 order/trade 到达。
     #
     # 两条回调走的是不同线程和不同通道: async_response 在异步下单的工作线程上
@@ -3825,6 +5756,11 @@ class BigQmtXtTrader:
     # 在途 response 触发回调的宽限（issue #156）。
     ASYNC_EXIT_DRAIN_SECONDS = 5.0
     ASYNC_EXIT_CALLBACK_GRACE_SECONDS = 3.0
+    # Async cancel: same queue-and-batch pattern as async orders (issue #50
+    # applied to cancel_order_stock_async).  A batch of N cancels in one RPC
+    # instead of N round trips: 15 cancels drop from ~30s to ~2s.
+    ASYNC_CANCEL_BATCH_MIN = 2
+    ASYNC_CANCEL_BATCH_MAX = 500
 
     def _order_barrier(self):
         barrier = getattr(self, "_async_barrier", None)
@@ -3942,8 +5878,11 @@ class BigQmtXtTrader:
         for job in jobs:
             fields = self._async_job_fields(job[1], job[2])
             account_id = _account_id(fields.get("account"), self.client.account_id)
-            groups.setdefault(account_id, []).append((job, fields))
-        for account_id, group in groups.items():
+            # By id AND type (港股通 orders on a stock account id are a
+            # different book on the server).
+            key = (account_id, _account_type_param(fields.get("account")))
+            groups.setdefault(key, []).append((job, fields))
+        for (account_id, _type), group in groups.items():
             if len(group) < self.ASYNC_BATCH_MIN:
                 for (seq, args, kwargs), _fields in group:
                     self._submit_async_single(seq, args, kwargs)
@@ -3988,7 +5927,10 @@ class BigQmtXtTrader:
             item.setdefault("signal_id", "rpc-%s" % uuid.uuid4().hex)
             payload.append(item)
         try:
-            results = self.order_stock_batch(account_id, payload,
+            # The first job's StockAccount, not the bare id: order_stock_batch
+            # sends its declared type along (港股通).
+            batch_account = (group[0][1] or {}).get("account") or account_id
+            results = self.order_stock_batch(batch_account, payload,
                                              idempotent=False) or []
         except RpcServerRepliedError as exc:
             log.warning("async batch of %d refused by the server (%s); "
@@ -4064,6 +6006,16 @@ class BigQmtXtTrader:
             "wait_for_sysid": False,
         })
 
+    def _has_push_channel(self):
+        """Whether exec events can reach this client at all (#345).
+
+        redis carries them on pub/sub, zmq on the PUB socket; pipe / mysql /
+        shm have no push path, so nothing the server emits after the reply
+        ever arrives.
+        """
+        transport_name = str(getattr(self.client, "transport_name", "redis") or "redis").lower()
+        return transport_name in ("redis", "", "default", "zmq")
+
     def _submit_async_single(self, seq, args, kwargs):
         """Submit one job and enqueue its outcome. Runs on the order worker."""
         stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
@@ -4073,7 +6025,13 @@ class BigQmtXtTrader:
             # wait_settlement=False：passorder 一返回就应答，不在 worker 里等
             # 服务端结算（那是 #69 要的吞吐）。委托号从推送事件学——屏障暂存的
             # 委托事件里会带上（触发 response 前至多等 2s，学不到就回落 remark）。
-            result = self.order_stock_result(*args, wait_settlement=False, **kwargs)
+            #
+            # 没有推送通道的传输（pipe / mysql）学不到任何事件，服务端为拒单
+            # 推的 order_error 也到不了（#345）。那里让 worker 等服务端结算：
+            # 调用方本来就不阻塞，而 server_error 会走下面的 except 变成
+            # on_order_error，否则一张资金不足被终端拦下的单永远没有回音。
+            result = self.order_stock_result(
+                *args, wait_settlement=not self._has_push_channel(), **kwargs)
         except Exception as exc:
             self._enqueue_async_outcome({
                 "kind": "error", "seq": seq, "remark": remark,
@@ -4122,6 +6080,10 @@ class BigQmtXtTrader:
         the #51 contract -- a委托's async_response before its held order/trade
         events -- is unchanged from when everything ran on one thread.
         """
+        kind = unit.get("kind", "")
+        if kind in ("cancel_response", "cancel_error"):
+            self._fire_async_cancel_outcome(unit)
+            return
         callback = self.callback
         seq = unit["seq"]
         remark = unit["remark"]
@@ -4130,6 +6092,9 @@ class BigQmtXtTrader:
                 if callback is not None:
                     callback.on_order_error(
                         CompatObject(
+                            account_id=self.client.account_id,
+                            account_type=self._account_type_value(),
+                            strategy_name=unit.get("strategy_name", ""),
                             error_id=unit["error_id"],
                             error_msg=unit["error_msg"],
                             order_sysid="",          # MiniQMT 规范名 (issue #65)
@@ -4164,6 +6129,7 @@ class BigQmtXtTrader:
                 callback.on_order_stock_async_response(
                     CompatObject(
                         account_id=self.client.account_id,
+                        account_type=self._account_type_value(),
                         seq=seq,
                         order_id=self._order_object_id(order_sys_id or unit["user_order_id"]),
                         order_sysid=order_sys_id,    # MiniQMT 规范名 (issue #65)
@@ -4180,6 +6146,63 @@ class BigQmtXtTrader:
         finally:
             # response/error 已触发 -> 放行这笔委托暂存的 order/trade (issue #51)。
             self._release_order_barrier(remark, seq)
+
+    def _fire_async_cancel_outcome(self, unit):
+        """Fire on_cancel_order_stock_async_response / on_cancel_error."""
+        callback = self.callback
+        seq = unit["seq"]
+        order_id = unit.get("order_id", "")
+        try:
+            if unit["kind"] == "cancel_error":
+                if callback is not None:
+                    callback.on_cancel_error(
+                        CompatObject(
+                            account_id=self.client.account_id,
+                            account_type=self._account_type_value(),
+                            # No code reaches this path (stock_code is ""
+                            # just below), so the market is unknown.
+                            market=-1,
+                            error_id=unit["error_id"],
+                            error_msg=unit["error_msg"],
+                            # seq was missing here while the response path had
+                            # it -- an uncorrelatable error is how "which
+                            # cancel failed?" goes unanswered.
+                            seq=seq,
+                            order_sysid=str(order_id or ""),
+                            order_sys_id=str(order_id or ""),
+                            order_id=self._order_object_id(order_id),
+                            stock_code="",
+                        )
+                    )
+            elif callback is not None:
+                ok = unit.get("success", False)
+                callback.on_cancel_order_stock_async_response(
+                    CompatObject(
+                        account_id=self.client.account_id,
+                        account_type=self._account_type_value(),
+                        seq=seq,
+                        success=bool(ok),
+                        cancel_result=0 if ok else -1,
+                        # The native cancel return answers "the request went
+                        # out", not "the order is cancelled" -- it has been
+                        # false while the cancel landed (#148) and true for a
+                        # nonexistent order (#151). Never word it as a
+                        # rejection; the order-status push (54) or a query is
+                        # the confirmation.
+                        error_msg="" if ok else (
+                            "cancel not confirmed by the counter; the order may "
+                            "still get cancelled -- check the order-status push "
+                            "or query before assuming either way"),
+                        order_sysid=str(order_id or ""),
+                        order_sys_id=str(order_id or ""),
+                        order_id=self._order_object_id(order_id),
+                    ),
+                )
+        except Exception:
+            log.exception(
+                "user callback failed: async cancel outcome seq=%s kind=%s",
+                seq, unit.get("kind"),
+            )
 
     def order_stock_async(self, *args, **kwargs):
         """Queue an order and return its seq immediately (MiniQMT semantics).
@@ -4217,7 +6240,8 @@ class BigQmtXtTrader:
         not merely the drained queues.
         """
         deadline = time.time() + float(timeout)
-        for name in ("_async_order_queue", "_async_callback_queue"):
+        for name in ("_async_order_queue", "_async_cancel_queue",
+                      "_async_callback_queue"):
             queue_obj = getattr(self, name, None)
             if queue_obj is None:
                 continue
@@ -4248,7 +6272,7 @@ class BigQmtXtTrader:
             entry = dict(item or {})
             entry.setdefault("account_id", account_id)
             payload.append(entry)
-        params = {"account_id": account_id, "orders": payload}
+        params = _with_account_type({"account_id": account_id, "orders": payload}, account)
         if not idempotent:
             params["idempotent"] = False
         if batch_id:
@@ -4291,7 +6315,7 @@ class BigQmtXtTrader:
         passorder without placing an order -- use it to check your mapping.
         """
         account_id = _account_id(account, self.client.account_id)
-        params = {
+        params = _with_account_type({
             "account_id": account_id,
             "op_type": op_type,
             "order_code": order_code,
@@ -4300,7 +6324,7 @@ class BigQmtXtTrader:
             "volume": volume,
             "strategy_name": strategy_name,
             "user_order_id": user_order_id,
-        }
+        }, account)
         if order_type is not None:
             params["order_type"] = order_type
         if quick_trade is not None:
@@ -4320,12 +6344,12 @@ class BigQmtXtTrader:
         account_id = _account_id(account, self.client.account_id)
         data = self.client.call(
             "cancel_order_stock_sysid",
-            {
+            _with_account_type({
                 "account_id": account_id,
                 "market": market,
                 # Send the broker's own 合同编号, not the int we derived from it.
                 "order_sysid": self._resolve_order_sys_id(order_sysid),
-            },
+            }, account),
             account_id=account_id,
         ) or {}
         return 0 if bool(data.get("success", data)) else -1
@@ -4348,15 +6372,55 @@ class BigQmtXtTrader:
     def _query_account_list(self, account, method):
         account_id = _account_id(account, self.client.account_id)
         try:
-            return self.client.call(method, {"account_id": account_id}, account_id=account_id) or []
+            rows = self.client.call(method, _with_account_type({"account_id": account_id}, account),
+                                    account_id=account_id) or []
         except Exception:
             return []
+        # MiniQMT answers these by attribute (see CompatRow). The server
+        # already relays the terminal's own m_ names, so only the
+        # container was wrong.
+        if isinstance(rows, list):
+            return [_as_compat_row(row) for row in rows]
+        return _as_compat_row(rows)
 
     def query_account_infos(self, account=None):
         return self._query_account_list(account, "query_account_infos")
 
     def query_account_status(self, account=None):
         return self._query_account_list(account, "query_account_status")
+
+    # -- 可转债 转股 / 回售（大 QMT 有、MiniQMT 没有）-----------------------
+    def convert_bond(self, account, stock_code, volume, strategy_name="", order_remark=""):
+        """可转债转股：把 ``volume`` 张转债转成正股（大 QMT passorder opType 80 / 82）。
+
+        MiniQMT 没有这个操作。账户类型决定编号：普通户 80，信用户 82，按
+        ``account.account_type``（StockAccount 的第二个参数）选。返回和
+        ``order_stock`` 一样的 order_id；没有买卖方向，`price` 送 0。
+        转股不可撤销，请先核对代码是转债代码、数量是张数。
+        """
+        return self._convertible_op("convert", account, stock_code, volume,
+                                    strategy_name, order_remark)
+
+    def sell_back_bond(self, account, stock_code, volume, strategy_name="", order_remark=""):
+        """可转债回售：把 ``volume`` 张转债按回售条款卖回发行人（opType 81 / 83）。
+
+        同 ``convert_bond``：普通户 81，信用户 83，按账户类型选；只在回售
+        申报期内有效，其余时间柜台会拒。
+        """
+        return self._convertible_op("sell_back", account, stock_code, volume,
+                                    strategy_name, order_remark)
+
+    def _convertible_op(self, action, account, stock_code, volume, strategy_name, order_remark):
+        from .adapters.order_bigqmt import convertible_optype_for
+
+        account_type = _account_type_name(getattr(account, "account_type", None)) \
+            or getattr(self, "_declared_account_type", "") or "STOCK"
+        op_type = convertible_optype_for(action, account_type)
+        data = self.order_stock_result(
+            account, stock_code, op_type, int(volume), 11, 0.0,
+            strategy_name, order_remark,
+        )
+        return self._order_id(data.get("order_sys_id"))
 
     def query_credit_detail(self, account):
         """信用账户明细，读终端缓存的信用账号对象（同步）。
@@ -4399,12 +6463,21 @@ class BigQmtXtTrader:
                 error / callback_bound
         """
         account_id = _account_id(account, self.client.account_id)
-        params = {"account_id": account_id}
+        params = _with_account_type({"account_id": account_id}, account)
         if wait_seconds is not None:
             params["wait_seconds"] = float(wait_seconds)
         if max_age_seconds is not None:
             params["max_age_seconds"] = float(max_age_seconds)
-        return self.client.call("query_credit_account", params, account_id=account_id)
+        answer = self.client.call("query_credit_account", params, account_id=account_id)
+        # The envelope stays a dict; its rows are the same native credit rows
+        # query_credit_detail returns, and #271 made those attribute-readable
+        # (CompatRow). This path bypassed _query_account_list and was missed,
+        # so ``r["rows"][0].m_dAssureAsset`` raised where the detail path
+        # answered. Same container change, same reason.
+        if isinstance(answer, dict) and isinstance(answer.get("rows"), list):
+            answer = dict(answer)
+            answer["rows"] = [_as_compat_row(row) for row in answer["rows"]]
+        return answer
 
     def query_stk_compacts(self, account):
         return self._query_account_list(account, "query_stk_compacts")
@@ -4429,8 +6502,9 @@ class BigQmtXtTrader:
         try:
             return self.client.call(
                 "query_smt_secu_rate",
-                {"account_id": account_id, "stock_code": stock_code, "max_term": max_term,
-                 "fare_way": fare_way, "credit_type": credit_type, "trade_type": trade_type},
+                _with_account_type({"account_id": account_id, "stock_code": stock_code, "max_term": max_term,
+                                    "fare_way": fare_way, "credit_type": credit_type,
+                                    "trade_type": trade_type}, account),
                 account_id=account_id,
             ) or []
         except Exception:
@@ -4473,7 +6547,7 @@ class BigQmtXtTrader:
         try:
             data = self.client.call(
                 "get_new_purchase_limit",
-                {"account_id": account_id},
+                _with_account_type({"account_id": account_id}, account),
                 account_id=account_id,
             ) or {}
             if isinstance(data, dict):
@@ -4652,94 +6726,30 @@ class BigQmtXtTrader:
         return self._async_query(self.query_appointment_info, account, callback)
 
     def cancel_order_stock_async(self, account, order_id):
-        # MiniQMT: returns seq, result comes back via on_cancel_order_stock_async_response.
+        """Queue a cancel and return its seq immediately (non-blocking).
+
+        Used to call cancel_order_stock inline, blocking for the full RPC
+        round trip per cancel.  15 cancels serialised at ~2s each = 30s.
+        Now the cancel runs on a worker thread and a backlog is batched
+        into one RPC (cancel_orders_batch), so 15 cancels take ~2s total.
+
+        The outcome arrives through on_cancel_order_stock_async_response
+        or on_cancel_error on the callback worker thread.
+        """
         seq = self._next_async_seq()
-        try:
-            # 0 == success now (MiniQMT contract, issue #113), so a bare
-            # truthiness test on the return would read backwards.
-            ok = self.cancel_order_stock(account, order_id) == 0
-        except Exception as exc:
-            callback = self.callback
-            if callback is not None:
-                try:
-                    callback.on_cancel_error(
-                        CompatObject(
-                            error_id=getattr(exc, "errno", 0),
-                            error_msg=str(exc),
-                            order_sysid=str(order_id or ""),
-                            order_sys_id=str(order_id or ""),
-                            order_id=self._order_object_id(order_id),
-                            stock_code="",
-                        )
-                    )
-                except Exception:
-                    log.exception("user callback failed: on_cancel_error")
-            return seq
-        callback = self.callback
-        if callback is not None:
-            try:
-                callback.on_cancel_order_stock_async_response(
-                    CompatObject(
-                        account_id=self.client.account_id,
-                        seq=seq,
-                        success=bool(ok),
-                        # MiniQMT XtCancelOrderResponse 契约: cancel_result=0 成功,
-                        # 失败时给出非零错误码和可读 error_msg。
-                        cancel_result=0 if ok else -1,
-                        error_msg="" if ok else "cancel_order_stock rejected by server",
-                        order_sysid=str(order_id or ""),
-                        order_sys_id=str(order_id or ""),
-                        order_id=self._order_object_id(order_id),
-                    ),
-                )
-            except Exception:
-                log.exception(
-                    "user callback failed: on_cancel_order_stock_async_response seq=%s", seq
-                )
+        self._ensure_async_cancel_worker()
+        self._register_exit_drain()
+        self._async_cancel_queue.put((seq, (account, order_id), {}))
         return seq
 
     def cancel_order_stock_sysid_async(self, account, market, order_sysid):
+        """Queue a cancel-by-sysid and return its seq immediately."""
         seq = self._next_async_seq()
-        try:
-            ok = self.cancel_order_stock_sysid(account, market, order_sysid) == 0
-        except Exception as exc:
-            callback = self.callback
-            if callback is not None:
-                try:
-                    callback.on_cancel_error(
-                        CompatObject(
-                            error_id=getattr(exc, "errno", 0),
-                            error_msg=str(exc),
-                            order_sysid=str(order_sysid or ""),
-                            order_sys_id=str(order_sysid or ""),
-                            order_id=self._order_object_id(order_sysid),
-                            stock_code="",
-                        )
-                    )
-                except Exception:
-                    log.exception("user callback failed: on_cancel_error")
-            return seq
-        callback = self.callback
-        if callback is not None:
-            try:
-                callback.on_cancel_order_stock_async_response(
-                    CompatObject(
-                        account_id=self.client.account_id,
-                        seq=seq,
-                        success=bool(ok),
-                        # MiniQMT XtCancelOrderResponse 契约: cancel_result=0 成功,
-                        # 失败时给出非零错误码和可读 error_msg。
-                        cancel_result=0 if ok else -1,
-                        error_msg="" if ok else "cancel_order_stock rejected by server",
-                        order_sysid=str(order_sysid or ""),
-                        order_sys_id=str(order_sysid or ""),
-                        order_id=self._order_object_id(order_sysid),
-                    ),
-                )
-            except Exception:
-                log.exception(
-                    "user callback failed: on_cancel_order_stock_async_response seq=%s", seq
-                )
+        self._ensure_async_cancel_worker()
+        self._register_exit_drain()
+        self._async_cancel_queue.put(
+            (seq, (account, order_sysid, market), {})
+        )
         return seq
 
     def set_relaxed_response_order_enabled(self, enabled=True):
@@ -4776,7 +6786,10 @@ class BigQmtXtTrader:
 
     def _order_from_dict(self, account_id, item):
         action = item.get("action")
-        order_type = _action_to_order_type(action)
+        order_type = (option_order_type(item.get("direction"), item.get("offset_flag"), action)
+                      if self._account_type_value(item) == 6 else _action_to_order_type(action))
+        # #330 跟修：entrust 判据优先，op 判据兜底
+        order_type = _credit_order_type_for_row(item, order_type)
         order_sysid = str(item.get("order_sys_id") or item.get("order_sysid") or item.get("order_id") or "")
         return CompatObject(
             account_id=account_id,
@@ -4822,7 +6835,9 @@ class BigQmtXtTrader:
 
     def _trade_from_dict(self, account_id, item):
         action = item.get("action")
-        order_type = _action_to_order_type(action)
+        order_type = (option_order_type(item.get("direction"), item.get("offset_flag"), action)
+                      if self._account_type_value(item) == 6 else _action_to_order_type(action))
+        order_type = _credit_order_type_for_row(item, order_type)
         order_sysid = str(item.get("order_sys_id") or item.get("order_sysid") or "")
         trade_id = str(item.get("trade_id") or "")
         traded_volume = _safe_int(item.get("volume", item.get("traded_volume")))

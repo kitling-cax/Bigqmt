@@ -17,6 +17,14 @@
         "host_id": {"type": "string", "minLength": 1}
       }
     },
+    "host_agent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "fact_secret_path": {"type": "string", "minLength": 1},
+        "outbox_path": {"type": "string", "minLength": 1}
+      }
+    },
     "environments": {
       "type": "object",
       "additionalProperties": true,
@@ -33,6 +41,7 @@
       "properties": {
         "qmt_root": {"type": "string", "minLength": 1},
         "bin_x64": {"type": "string", "minLength": 1},
+        "account_id": {"type": "string", "minLength": 1},
         "redis": {
           "type": "object",
           "additionalProperties": true,

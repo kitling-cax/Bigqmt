@@ -45,12 +45,13 @@ def _tail_text(path: Path, limit: int = 20) -> list[str]:
 
 
 def find_tray_processes(profile: str) -> list[dict[str, Any]]:
-    """Return only PowerShell processes that host this exact tray profile."""
+    """Return PowerShell-hosted or native EXE processes for this profile."""
     if os.name != "nt":
         return []
+    exe_name = "BigQMT_Simulation.exe" if profile == "simulation" else "BigQMT_Production_ReadOnly.exe"
     command = (
-        "$p=Get-CimInstance Win32_Process -Filter \"Name='powershell.exe' OR Name='pwsh.exe'\" "
-        "| Select-Object ProcessId,Name,CommandLine; $p|ConvertTo-Json -Compress"
+        "$p=Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('powershell.exe','pwsh.exe','%s') } "
+        "| Select-Object ProcessId,Name,CommandLine,ExecutablePath; $p|ConvertTo-Json -Compress" % exe_name
     )
     try:
         completed = subprocess.run(
@@ -71,8 +72,13 @@ def find_tray_processes(profile: str) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         line = str(row.get("CommandLine") or "")
-        if needle.lower() in line.lower() and profile_needle.lower() in line.lower():
-            result.append({"pid": int(row.get("ProcessId") or 0), "name": str(row.get("Name") or ""), "command_line": line})
+        name = str(row.get("Name") or "")
+        executable = str(row.get("ExecutablePath") or "")
+        native_match = name.lower() == exe_name.lower() or executable.lower().endswith("\\" + exe_name.lower())
+        powershell_match = needle.lower() in line.lower() and profile_needle.lower() in line.lower()
+        if native_match or powershell_match:
+            result.append({"pid": int(row.get("ProcessId") or 0), "name": name,
+                           "command_line": line, "executable_path": executable})
     return result
 
 

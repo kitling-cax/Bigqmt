@@ -8,6 +8,13 @@ Never commit QMT or broker passwords, Fact Secrets, execution authorization
 Keys, API tokens, private keys, `config/machine.local.json`, runtime databases,
 WAL files, logs, live reports or complete account statements.
 
+An optional NAS private overlay may provide account identifiers, Coordinator
+endpoints, QMT roots and local ports. Run `scripts/bootstrap_private_config.py`
+explicitly to copy and validate it into the local `machine.local.json` cache.
+Runtime loaders never open the NAS share, so a NAS outage cannot stop a tray
+from starting. The loader rejects secret-like fields; the NAS file must never
+contain passwords, tokens, Fact Secrets or execution Keys.
+
 Use the ignored local configuration and host-local protected secret store:
 
 ```text

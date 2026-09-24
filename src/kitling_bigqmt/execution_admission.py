@@ -5,16 +5,14 @@ this module immediately before it writes an RPC request.  The gate is
 deliberately narrow:
 
   * a formal (production) account is denied unconditionally,
-  * the local runtime control must already be armed for this exact
-    environment/account/strategy and still be inside its short window,
-  * the Coordinator (read-only preview) must designate this host as the
-    eligible executor for the account; an unreachable Coordinator denies,
+  * the local runtime control must already be enabled for this exact
+    environment/account/strategy,
+  * the Coordinator is monitor-only and is never an execution dependency,
   * a lease envelope cannot open execution yet, because leased execution is
     not part of the current milestone.
 
 Nothing here talks to Redis, QMT, or a broker.  The gate can only deny; the
-caller keeps ownership of the actual submit, its idempotency claim, and the
-finally re-lock.
+  caller keeps ownership of the actual submit and its idempotency claim.
 """
 from __future__ import annotations
 
@@ -26,6 +24,8 @@ from urllib.request import urlopen
 
 from .coordinator_endpoint import resolve_coordinator
 from .coordinator_lease_projection import project_local_lease
+from .machine_config import load_gateway, load_machine_local
+from .order_authorization_key import status as order_authorization_key_status
 from .host_agent_account_policy import (
     AccountPolicyRejected,
     evaluate_local_execution,
@@ -34,7 +34,8 @@ from .host_agent_account_policy import (
 
 
 SIMULATION_ENVIRONMENT = "SIMULATION"
-SIMULATION_WINDOW_MODE = "SIMULATION_STRATEGY_EXECUTION_WINDOW"
+SIMULATION_WINDOW_MODE = "SIMULATION_STRATEGY_EXECUTION_WINDOW"  # legacy
+SIMULATION_ENABLED_MODE = "SIMULATION_STRATEGY_EXECUTION_ENABLED"
 ADMITTED_REASON = "ADMITTED_SIMULATION_SINGLE_WRITER"
 
 
@@ -101,18 +102,20 @@ def _authorization_denial(
         return "LOCAL_AUTHORIZATION_MISSING"
     if str(authorization.get("environment") or "").upper() != SIMULATION_ENVIRONMENT:
         return "LOCAL_AUTHORIZATION_ENVIRONMENT_MISMATCH"
-    if str(authorization.get("mode") or "") != SIMULATION_WINDOW_MODE:
+    mode = str(authorization.get("mode") or "")
+    if mode not in {SIMULATION_WINDOW_MODE, SIMULATION_ENABLED_MODE}:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
     if authorization.get("orders_enabled") is not True:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
     if authorization.get("execution_consumer_enabled") is not True:
         return "LOCAL_AUTHORIZATION_NOT_ARMED"
-    try:
-        valid_until = float(authorization.get("valid_until_epoch") or 0)
-    except (TypeError, ValueError):
-        return "LOCAL_AUTHORIZATION_NOT_ARMED"
-    if valid_until <= now_epoch:
-        return "LOCAL_AUTHORIZATION_EXPIRED"
+    if mode == SIMULATION_WINDOW_MODE:
+        try:
+            valid_until = float(authorization.get("valid_until_epoch") or 0)
+        except (TypeError, ValueError):
+            return "LOCAL_AUTHORIZATION_NOT_ARMED"
+        if valid_until <= now_epoch:
+            return "LOCAL_AUTHORIZATION_EXPIRED"
     # Account and strategy binding are checked only once a real armed window
     # exists, so a locked control file reports the truthful NOT_ARMED state.
     if str(authorization.get("account_id") or "").strip() != account_id:
@@ -123,12 +126,29 @@ def _authorization_denial(
     return None
 
 
+def _order_key_denial(
+    key_status: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+) -> str | None:
+    """Return the fail-closed denial reason for the persistent local Key."""
+    if not isinstance(key_status, Mapping) or not key_status.get("installed"):
+        return "LOCAL_ORDER_KEY_MISSING"
+    if str(key_status.get("account_id") or "").strip() != account_id:
+        return "LOCAL_ORDER_KEY_ACCOUNT_MISMATCH"
+    if key_status.get("valid") is not True:
+        return "LOCAL_ORDER_KEY_INVALID:%s" % str(key_status.get("state") or "INVALID")
+    return None
+
+
 def evaluate_execution_admission(
     profile: str,
     *,
     account_id: str | None = None,
     host_id: str | None = None,
     strategy_id: str | None = None,
+    configured_account_id: str | None = None,
+    order_key_status: Mapping[str, Any] | None = None,
     authorization: Mapping[str, Any] | None = None,
     designation: Mapping[str, Any] | None = None,
     lease_envelope: Mapping[str, Any] | None = None,
@@ -142,7 +162,9 @@ def evaluate_execution_admission(
     """
     moment = time.time() if now_epoch is None else float(now_epoch)
     try:
-        policy = resolve_account_policy(profile, account_id)
+        policy = resolve_account_policy(
+            profile, account_id, configured_account_id=configured_account_id
+        )
     except AccountPolicyRejected as exc:
         return _deny("ACCOUNT_POLICY_REJECTED:%s" % exc, profile=profile, account_id=account_id)
 
@@ -155,25 +177,19 @@ def evaluate_execution_admission(
     if policy.production_readonly:
         return _deny("PRODUCTION_READ_ONLY", **base)
 
+    key_denial = _order_key_denial(order_key_status, account_id=policy.account_id)
+    if key_denial is not None:
+        return _deny(key_denial, **base)
+
     denial = _authorization_denial(
         authorization, account_id=policy.account_id, strategy_id=strategy_id, now_epoch=moment
     )
     if denial is not None:
         return _deny(denial, **base)
 
-    if not isinstance(designation, Mapping) or not designation.get("reachable"):
-        return _deny(
-            "COORDINATOR_UNREACHABLE",
-            coordinator_reason=str((designation or {}).get("reason", "NOT_CONTACTED")),
-            **base,
-        )
-    if not designation.get("eligible"):
-        return _deny(
-            "COORDINATOR_DENIES_HOST",
-            coordinator_reason=str(designation.get("reason", "NOT_ELIGIBLE")),
-            coordinator_lease_state=str(designation.get("lease_state", "UNKNOWN")),
-            **base,
-        )
+    # Coordinator is deliberately excluded from local admission.  Its
+    # designation is retained only as an optional monitoring annotation.
+    monitor_designation = dict(designation or {}) if isinstance(designation, Mapping) else {}
 
     if lease_envelope is not None:
         # A lease is only audited here: leased execution is a later milestone,
@@ -194,11 +210,12 @@ def evaluate_execution_admission(
 
     verdict = {
         "allowed": True,
-        "orders_enabled": False,
-        "standing_order_switch_open": False,
+        "orders_enabled": True,
+        "standing_order_switch_open": True,
         "reason": ADMITTED_REASON,
-        "coordinator_lease_state": str(designation.get("lease_state", "UNKNOWN")),
-        "coordinator_candidate_reason": str(designation.get("reason", "NOT_REPORTED")),
+        "coordinator_mode": "MONITOR_ONLY",
+        "coordinator_lease_state": str(monitor_designation.get("lease_state", "NOT_REQUIRED")),
+        "coordinator_candidate_reason": str(monitor_designation.get("reason", "NOT_REQUIRED")),
         "checked_at_epoch": moment,
     }
     verdict.update(base)
@@ -226,12 +243,30 @@ def require_admission_for_root(
 
     Scripts call this immediately before writing an order RPC request.
     """
-    endpoint, host_id = resolve_coordinator(Path(root))
-    designation = coordinator_designation(endpoint, profile, host_id, timeout=timeout)
+    root = Path(root)
+    _endpoint, host_id = resolve_coordinator(root)
+    # The account is deployment-local (machine.local.json), not the synthetic
+    # repository default.  Passing it here keeps the armed control window and
+    # the admission policy bound to the same real simulation account.
+    gateway = load_gateway(root, profile)
+    account_id = str(gateway.get("account_id") or "").strip() or None
+    local_key = order_authorization_key_status(profile, account_id)
+    # Do not contact Coordinator here.  It is a monitor-only service.  The
+    # local authorization Key and runtime state are the execution authority.
+    designation = {
+        "reachable": True,
+        "eligible": True,
+        "lease_state": "LOCAL_SIMULATION_EXECUTOR",
+        "reason": "COORDINATOR_MONITOR_ONLY",
+        "monitor_only": True,
+    }
     return require_execution_admission(
         profile,
+        account_id=account_id,
+        configured_account_id=account_id,
         host_id=host_id,
         strategy_id=strategy_id,
+        order_key_status=local_key,
         authorization=authorization,
         designation=designation,
         now_epoch=now_epoch,

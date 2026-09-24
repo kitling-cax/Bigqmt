@@ -10,7 +10,7 @@
   },
   "rpc_timeout_seconds": 12,
   "bridge_snapshot_max_age_seconds": 4500,
-  "state_db": "C:\\BigQMT\\work\\kitling_bigqmt\\runtime_data\\state\\simulation\\qmt_runtime.sqlite3",
-  "audit_dir": "C:\\BigQMT\\work\\kitling_bigqmt\\runtime_data\\audit\\simulation",
+  "state_db": "state/simulation/qmt_runtime.sqlite3",
+  "audit_dir": "audit/simulation",
   "quote_codes": []
 }

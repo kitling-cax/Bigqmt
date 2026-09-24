@@ -23,10 +23,12 @@ class HostAgentClient:
     transport: Callable[..., Any] = urlopen
 
     def heartbeat(self, services: dict[str, str], *, state: str = "HEALTHY_READONLY",
-                  account_ids: list[str] | None = None, version: str = "") -> dict[str, Any]:
+                  account_ids: list[str] | None = None, version: str = "",
+                  strategy_instances: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if state != "HEALTHY_READONLY":
             raise ValueError("first Host Agent release is read-only")
-        body = build_heartbeat(self.host_id, state, services, account_ids=account_ids, version=version)
+        body = build_heartbeat(self.host_id, state, services, account_ids=account_ids, version=version,
+                               strategy_instances=strategy_instances)
         request = Request(self.endpoint.rstrip("/") + "/api/v1/hosts/heartbeat",
                           data=json.dumps(body).encode("utf-8"),
                           headers={"Content-Type": "application/json"}, method="POST")

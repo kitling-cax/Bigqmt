@@ -32,26 +32,17 @@ def test_runtime_control_accepts_legacy_uppercase_environment(tmp_path: Path):
     assert state["environment"] == "SIMULATION"
 
 
-def test_runtime_control_only_arms_a_short_simulation_window(tmp_path: Path):
+def test_runtime_control_enables_persistent_simulation_execution(tmp_path: Path):
     target = tmp_path / "control.json"
     control = RuntimeControl(target, environment="simulation")
     armed = control.arm_simulation_strategy(
         account_id="90000001", strategy_id="S10", approval_scope="test", valid_for_seconds=30,
     )
     assert armed["orders_enabled"] is True
-    assert control.status()["mode"] == "SIMULATION_STRATEGY_EXECUTION_WINDOW"
+    assert control.status()["mode"] == "SIMULATION_STRATEGY_EXECUTION_ENABLED"
     assert control.status()["orders_enabled"] is True
-
-    target.write_text(
-        '{"environment":"SIMULATION","mode":"SIMULATION_STRATEGY_EXECUTION_WINDOW",'
-        '"account_id":"90000001","strategy_id":"S10","orders_enabled":true,'
-        '"execution_consumer_enabled":true,"preflight_admission":"ALLOWED",'
-        '"parity_admission":"ALLOWED","simulation_confirmation":"SIMULATION_ORDER_VALIDATED",'
-        '"valid_until_epoch":%s}' % (time.time() - 1),
-        encoding="utf-8",
-    )
-    assert control.status()["orders_enabled"] is False
-    assert control.status()["mode"] == "READ_ONLY_LOCKED"
+    time.sleep(0.01)
+    assert control.status()["orders_enabled"] is True
 
 
 def test_runtime_control_never_arms_production(tmp_path: Path):

@@ -34,6 +34,17 @@ def test_account_id_mismatch_fails_closed():
         resolve_account_policy("production_readonly", "90000001")
 
 
+def test_machine_configured_account_binding_does_not_require_repository_identity():
+    policy = resolve_account_policy(
+        "simulation", "LOCAL_ACCOUNT", configured_account_id="LOCAL_ACCOUNT"
+    )
+    assert policy.account_id == "LOCAL_ACCOUNT"
+    with pytest.raises(AccountPolicyRejected, match="does not match"):
+        resolve_account_policy(
+            "simulation", "OTHER_ACCOUNT", configured_account_id="LOCAL_ACCOUNT"
+        )
+
+
 def test_unknown_profile_fails_closed():
     with pytest.raises(AccountPolicyRejected, match="unknown profile"):
         resolve_account_policy("production")

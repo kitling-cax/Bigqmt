@@ -252,7 +252,57 @@ _ETF_OPTION_SELL_SIDE = frozenset({
     54,  # 备兑开仓
 })
 # 56 认购行权 / 57 认沽行权 / 58 证券锁定 / 59 证券解锁 没有买卖方向，
-# 和 直接还款(32) 一样必须由调用方显式传 action。
+# 和 直接还款(32 / 45) 一样：没有证券腿，BUY/SELL 都不对。
+#
+# 这些类型曾要求调用方显式传 action（#103）。但 MiniQMT 的 order_stock 签名里
+# 根本没有 action 这个参数——按官方写法 `order_stock(acc, code, CREDIT_DIRECT_CASH_REPAY,
+# 金额, FIX_PRICE, 0, ...)` 归还融资，兼容层无处可传，直接被拒（#314）。所以
+# 无方向类型不再要求 action：记账方向记成 SIDELESS_DEFAULT_ACTION，真正送进
+# passorder 的仍是原始 opType，结算回找对这些类型不按方向过滤。
+SIDELESS_ORDER_TYPES = frozenset({
+    _XC.CREDIT_DIRECT_CASH_REPAY, _XC.CREDIT_DIRECT_CASH_REPAY_SPECIAL,   # 32 / 45
+    56, 57, 58, 59,
+    80, 81, 82, 83,                                                       # 可转债 转股 / 回售
+})
+
+# 可转债转股 / 回售，passorder 的 opType（大 QMT 内置 API 参考 10.1）：
+#   80 普通账户转股   81 普通账户回售   82 信用账户转股   83 信用账户回售
+# MiniQMT 没有对应的 order_stock 类型（它的 OPT_CONVERT_BONDS=51 是委托记录里的
+# 操作码，和 passorder 的 51 卖出平仓撞号，不能拿来当 order_type）。这里按大 QMT
+# 的编号收，原样透传；没有买卖方向。
+CONVERTIBLE_CONVERT_STOCK = 80
+CONVERTIBLE_SELL_BACK_STOCK = 81
+CONVERTIBLE_CONVERT_CREDIT = 82
+CONVERTIBLE_SELL_BACK_CREDIT = 83
+CONVERTIBLE_OP_TYPES = frozenset({80, 81, 82, 83})
+
+
+def convertible_optype_of(order_type):
+    """可转债转股/回售的 passorder opType，不是则 None。"""
+    try:
+        value = int(order_type)
+    except (TypeError, ValueError):
+        return None
+    return value if value in CONVERTIBLE_OP_TYPES else None
+
+
+def convertible_optype_for(action, account_type):
+    """opType for ``action`` ("convert" / "sell_back") on an account type."""
+    credit = str(account_type or "").strip().upper() == "CREDIT"
+    if str(action or "").strip().lower() in ("convert", "转股"):
+        return CONVERTIBLE_CONVERT_CREDIT if credit else CONVERTIBLE_CONVERT_STOCK
+    if str(action or "").strip().lower() in ("sell_back", "sellback", "回售"):
+        return CONVERTIBLE_SELL_BACK_CREDIT if credit else CONVERTIBLE_SELL_BACK_STOCK
+    raise ValueError("convertible action must be 'convert' or 'sell_back', got %r" % (action,))
+SIDELESS_DEFAULT_ACTION = SignalAction.SELL.value
+
+
+def is_sideless_order_type(order_type):
+    """True for order_types that have no buy/sell side (直接还款, 行权, 锁定/解锁)."""
+    try:
+        return int(order_type) in SIDELESS_ORDER_TYPES
+    except (TypeError, ValueError):
+        return False
 
 # 能接受直通 opType 的账号类型（见 init_config.ACCOUNT_TYPES）。
 # 股票账号收到期货 opType 时必须拒绝，不能回落到 23/24 —— 那会真的发出
@@ -286,7 +336,7 @@ def credit_action_of(order_type):
     """BUY / SELL for a credit order_type, or None if it is not one.
 
     直接还款 (32 / 45) moves cash rather than securities, so it has no side;
-    callers must pass an action for it explicitly.
+    the handler records SIDELESS_DEFAULT_ACTION for it (#314).
     """
     try:
         value = int(order_type)
@@ -388,26 +438,7 @@ def _order_time_seconds(row):
         _report_missing_order_time(row)
         return 0
 
-    # 已是数字: 当成时间戳 (>1e11 视为毫秒)。
-    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
-        value = float(raw_time)
-        if value > 1e11:
-            value /= 1000.0
-        if value > 1e8:      # 像时间戳而不是 093015 这种时分秒
-            return int(value)
-
-    date_text = "".join(ch for ch in str(raw_date or "") if ch.isdigit())
-    time_text = "".join(ch for ch in str(raw_time or "") if ch.isdigit())
-    if not date_text or len(date_text) < 8:
-        return 0
-    time_text = (time_text + "000000")[:6]   # 补齐到 HHMMSS, 丢掉毫秒
-    try:
-        import time as _time
-
-        parsed = _time.strptime(date_text[:8] + time_text, "%Y%m%d%H%M%S")
-        return int(_time.mktime(parsed))
-    except Exception:
-        return 0
+    return date_time_seconds(raw_date, raw_time)
 
 
 def _price_type_value(value, default):
@@ -531,7 +562,14 @@ class BigQmtOrderGateway:
         raw_order_type = getattr(request, "order_type", None)
         credit_optype = credit_optype_of(raw_order_type)
         passthrough_optype = passthrough_optype_of(raw_order_type)
-        if credit_optype is not None:
+        convertible_optype = convertible_optype_of(raw_order_type)
+        if convertible_optype is not None:
+            # 转股 / 回售: the number already says which account book it is
+            # for (80/81 普通, 82/83 信用). Forward as-is; the caller (or the
+            # compat layer's convert_bond / sell_back_bond) picked it from the
+            # account type.
+            op_type = convertible_optype
+        elif credit_optype is not None:
             # A credit operation carries more than a side: mapping it back to
             # BUY/SELL would turn 融资买入 into an ordinary buy, which is the
             # bug behind issue #103 -- worse than the rejection it replaced,
@@ -654,11 +692,19 @@ class BigQmtOrderGateway:
         ok = cancel_func(order_ref.order_sys_id, aid, account_type, self.context_info)
         return CancelResult(success=bool(ok), message="" if ok else "cancel returned false")
 
+    def query_native_rows(self, account_id, kind, strategy_name=""):
+        """The terminal's own ORDER / DEAL rows for ``account_id``, unconverted.
+
+        For the secondary-account exec-event poller (#320): the rows are the
+        same objects the callbacks deliver, so they go through the same
+        normalizers. Main thread only, like every get_trade_detail_data.
+        """
+        query = self._require_query_func()
+        account_type = self._resolve_account_type(account_id)
+        return query(account_id, account_type, str(kind or "ORDER").upper(), strategy_name) or []
+
     def query_orders(self, account_id, strategy_name):
-        try:
-            return self.query_orders_strict(account_id, strategy_name)
-        except Exception:
-            return []
+        return self.query_orders_strict(account_id, strategy_name)
 
     def query_orders_strict(self, account_id, strategy_name):
         query = self._require_query_func()
@@ -737,33 +783,27 @@ class BigQmtOrderGateway:
                                                  "secu_account"), "") or ""),
                     offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
                     direction=_attr(row, ("m_nDirection", "direction")),
+                    # the terminal's own opType, for the client's order_type (#330)
+                    op_type=_attr(row, ("m_nOpType", "op_type")),
+                    # m_eEntrustType（54 融资/55 融券/57 信用普通）才是信用委托
+                    # 的可靠判别；m_nOpType 经 reporter 实盘数据证实分不出（#330 跟修）
+                    entrust_type=_attr(row, ("m_eEntrustType", "entrust_type")),
+                    opt_name=str(_attr(row, ("m_strOptName", "opt_name"), "") or ""),
                 )
             )
         return result
 
     def query_trades(self, account_id, strategy_name):
-        try:
-            return self.query_trades_strict(account_id, strategy_name)
-        except Exception:
-            return []
+        return self.query_trades_strict(account_id, strategy_name)
 
     def query_trades_strict(self, account_id, strategy_name):
         query = self._require_query_func()
         account_type = self._resolve_account_type(account_id)
-        rows = []
-        last_error = None
-        for detail_type in ("DEAL", "TRADE"):
-            try:
-                if str(strategy_name or "").strip():
-                    rows = query(account_id, account_type, detail_type, strategy_name) or []
-                else:
-                    rows = query(account_id, account_type, detail_type) or []
-                if rows:
-                    break
-            except Exception as exc:
-                last_error = exc
-        if not rows and last_error is not None:
-            raise last_error
+        # DEAL is the documented trade detail type; an empty result is a success.
+        if str(strategy_name or "").strip():
+            rows = query(account_id, account_type, "DEAL", strategy_name) or []
+        else:
+            rows = query(account_id, account_type, "DEAL") or []
         result = []
         account_type_code = self._account_type_code(account_id)
         name_cache = {}
@@ -822,6 +862,12 @@ class BigQmtOrderGateway:
                         row, ("m_dComssion", "m_dCommission", "commission")),
                     offset_flag=_attr(row, ("m_nOffsetFlag", "offset_flag")),
                     direction=_attr(row, ("m_nDirection", "direction")),
+                    # the terminal's own opType, for the client's order_type (#330)
+                    op_type=_attr(row, ("m_nOpType", "op_type")),
+                    # m_eEntrustType（54 融资/55 融券/57 信用普通）才是信用委托
+                    # 的可靠判别；m_nOpType 经 reporter 实盘数据证实分不出（#330 跟修）
+                    entrust_type=_attr(row, ("m_eEntrustType", "entrust_type")),
+                    opt_name=str(_attr(row, ("m_strOptName", "opt_name"), "") or ""),
                 )
             )
         return result

@@ -12,14 +12,26 @@
     "scope": "simulation account 90000001 only; production 90000002 remains read-only and formal execution stays FORBIDDEN",
     "unchanged": [
       "strategy semantics: S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15 untouched (no signal, sleeve, pool or holding-period change)",
-      "bounded window 09:35-14:50 Asia/Shanghai with a single deterministic attempt claim per signal day remains enforced by src/kitling_bigqmt/simulation_cycle.py",
-      "runtime_data/control/simulation/runtime_control.json resting state remains READ_ONLY_LOCKED"
+      "persistent unattended local simulation execution is enabled by operator approval; the scheduler remains idempotent per signal day and does not depend on Coordinator availability",
+      "runtime_data/control/simulation/runtime_control.json is enabled persistently for the local simulation profile; formal execution remains forbidden"
     ],
     "evidence": [
-      "manual preflight at 2026-09-16T07:29:38+08:00 returned BLOCKED outside bounded simulation execution window without touching the attempt claim (runtime_data/evidence/simulation/strategy_execution_cycles/v1_1_15_cycle_20260916_072938.json)",
-      "tray scheduler will run scripts/run_v1_1_15_simulation_cycle.py --execute once after 09:35 (tray/BigQMTAccountTray.cs SimulationCycleIfDue)"
+      "runtime_data/control/simulation/runtime_control.json is the authoritative local control: mode=SIMULATION_STRATEGY_EXECUTION_ENABLED, orders_enabled=true, execution_consumer_enabled=true",
+      "tray scheduler runs scripts/run_v1_1_15_simulation_cycle.py under the local persistent simulation control; Coordinator is monitor-only"
     ],
-    "orders_enabled_at_rest": false
+    "orders_enabled_at_rest": true,
+    "coordinator_boundary": "monitor_only_no_execution_restriction"
+  },
+  "local_simulation_execution": {
+    "status": "ENABLED_PERSISTENT_UNATTENDED",
+    "profile": "simulation",
+    "strategy_id": "S10_D1_U25_NO_ALCOHOL_5D_SIM_MAIN_V1_1_15",
+    "control_file": "runtime_data/control/simulation/runtime_control.json",
+    "orders_enabled": true,
+    "execution_consumer_enabled": true,
+    "coordinator_mode": "MONITOR_ONLY",
+    "last_verified": "2026-09-21",
+    "safety_boundary": "simulation_account_only; formal_account_remains_read_only"
   },
   "native_tray_snapshot_repair": {
     "date": "2026-09-16",

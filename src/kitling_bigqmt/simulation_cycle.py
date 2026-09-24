@@ -20,6 +20,47 @@ from .execution_holding import ActualHoldingBlocked, actual_holding_status, actu
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 FIRST_EXECUTION_TIME = time(9, 35)
 LAST_EXECUTION_TIME = time(14, 50)
+# Synthetic account retained only for deterministic unit fixtures and older
+# evidence replay.  Live Tray cycles bind to simulation_execution.ACCOUNT_ID.
+LEGACY_TEST_ACCOUNT_ID = "90000001"
+
+# xtquant order status values are numeric strings on the bridge.  A query of
+# ``query_stock_orders`` includes today's completed orders as well as live
+# orders, so the mere presence of a row is not evidence that another order is
+# unsafe.  Keep this allowlist conservative: an unknown/missing status stays
+# open (fail closed), while fully filled/cancelled/rejected rows are terminal.
+_TERMINAL_ORDER_STATUSES = frozenset({
+    "53", "54", "55", "56", "57",  # PART_CANCEL, CANCELED, JUNK, SUCCEEDED, FAILED
+    "CANCELED", "CANCELLED", "JUNK", "SUCCEEDED", "SUCCESS", "FAILED", "REJECTED", "REJECT",
+})
+
+
+def is_broker_order_open(order: dict[str, Any]) -> bool:
+    """Return whether a broker order row can still block a new submission.
+
+    A fully traded order may still be returned by QMT for the current day.  We
+    also use the volume relationship as a safety net when a bridge omits the
+    numeric status code.  Rows with neither a terminal status nor complete
+    traded volume remain open so an ambiguous broker response cannot cause a
+    second submission.
+    """
+    row = dict(order or {})
+    try:
+        volume = int(row.get("volume") or row.get("order_volume") or 0)
+        traded = int(row.get("traded_volume") or row.get("tradedVolume") or 0)
+    except (TypeError, ValueError):
+        volume, traded = 0, 0
+    if volume > 0 and traded >= volume:
+        return False
+    status = str(row.get("status") or row.get("order_status") or "").strip().upper()
+    if status in _TERMINAL_ORDER_STATUSES:
+        return False
+    return True
+
+
+def live_broker_orders(orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Filter a QMT order query down to orders that are still live."""
+    return [dict(row or {}) for row in list(orders or []) if is_broker_order_open(dict(row or {}))]
 
 
 def is_execution_window(now: datetime) -> bool:
@@ -33,7 +74,7 @@ def is_execution_window(now: datetime) -> bool:
     return local.weekday() < 5 and FIRST_EXECUTION_TIME <= local.time() <= LAST_EXECUTION_TIME
 
 
-def deterministic_signal_id(signal_event: dict[str, Any], plan: dict[str, Any]) -> str:
+def deterministic_signal_id(signal_event: dict[str, Any], plan: dict[str, Any], account_id: str = ACCOUNT_ID) -> str:
     """Create a stable identity for one signal-side-symbol action.
 
     A retry on the same close signal produces precisely the same identity,
@@ -42,13 +83,13 @@ def deterministic_signal_id(signal_event: dict[str, Any], plan: dict[str, Any]) 
     """
     payload = {
         "strategy_id": STRATEGY_ID,
-        "account_id": ACCOUNT_ID,
+        "account_id": str(account_id or "").strip(),
         "signal_day": str(signal_event.get("signal_day") or ""),
         "stock_code": str(plan.get("stock_code") or ""),
         "side": str(plan.get("side") or ""),
         "quantity": int(plan.get("quantity") or 0),
     }
-    if not payload["signal_day"] or not payload["stock_code"] or payload["quantity"] <= 0:
+    if not payload["account_id"] or not payload["signal_day"] or not payload["stock_code"] or payload["quantity"] <= 0:
         raise SimulationExecutionBlocked("cannot create identity for incomplete plan")
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:20]
     return "v1_1_15-%s-%s-%s" % (payload["signal_day"], payload["side"].lower(), digest)
@@ -68,11 +109,11 @@ def build_cycle_plan(
     trading_days: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return exactly one executable action, or block before any broker call."""
-    if str(account_id) != ACCOUNT_ID:
+    if not str(account_id or "").strip():
         raise SimulationExecutionBlocked("simulation account binding mismatch")
     if not is_execution_window(now):
         raise SimulationExecutionBlocked("outside bounded simulation execution window")
-    if list(open_orders):
+    if live_broker_orders(open_orders):
         raise SimulationExecutionBlocked("broker has open orders; reconcile before another submission")
     if str(reconciliation_status).upper() != "PASSED":
         raise SimulationExecutionBlocked("external baseline and sleeve reconciliation is not passed")
@@ -89,6 +130,7 @@ def build_cycle_plan(
         trade_day=today,
         sleeve_summary=sleeve_summary,
         ticks=ticks,
+        account_id=str(account_id),
     )
     if plan is None:
         return None
@@ -114,4 +156,4 @@ def build_cycle_plan(
         if str(signal_event.get("signal_day") or "") >= now.astimezone(SHANGHAI).strftime("%Y%m%d"):
             raise SimulationExecutionBlocked("a completed-close signal executes on a later trading day")
         plan["actual_holding"] = holding
-    return {**plan, "signal_id": deterministic_signal_id(signal_event, plan)}
+    return {**plan, "signal_id": deterministic_signal_id(signal_event, plan, account_id=str(account_id))}

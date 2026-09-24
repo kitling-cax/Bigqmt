@@ -8,6 +8,10 @@ ACCOUNT_BY_PROFILE = {
     "simulation": "90000001",
     "production_readonly": "90000002",
 }
+DEPLOYMENT_ACCOUNT_BY_PROFILE = {
+    "simulation": "90000001",
+    "production_readonly": "90000002",
+}
 
 
 def project_local_lease(preview: dict[str, Any], profile: str, host_id: str) -> dict[str, Any]:
@@ -15,10 +19,11 @@ def project_local_lease(preview: dict[str, Any], profile: str, host_id: str) -> 
         raise ValueError("unknown profile")
     if preview.get("mode") != "readonly-preview":
         raise ValueError("unexpected coordinator preview mode")
-    account_id = ACCOUNT_BY_PROFILE[profile]
-    entry = next((item for item in preview.get("accounts", []) if item.get("account_id") == account_id), None)
+    candidates = (ACCOUNT_BY_PROFILE[profile], DEPLOYMENT_ACCOUNT_BY_PROFILE[profile])
+    entry = next((item for item in preview.get("accounts", []) if item.get("account_id") in candidates), None)
     if not isinstance(entry, dict):
         raise ValueError("account is absent from preview")
+    account_id = str(entry.get("account_id"))
     candidate = next((item for item in entry.get("candidates", []) if item.get("host_id") == host_id), {})
     return {
         "profile": profile,

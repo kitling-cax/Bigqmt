@@ -5,14 +5,14 @@ version: 1
 updated: 2026-09-07
 
 simulation:
-  install_root: 'C:\BigQMT\work\国金QMT交易端模拟'
-  bin_x64: 'C:\BigQMT\work\国金QMT交易端模拟\bin.x64'
+  install_root: 'qmt/simulation'
+  bin_x64: 'qmt/simulation/bin.x64'
   mode: simulation
   order_enabled: false
 
 production:
-  install_root: 'C:\BigQMT\work\国金证券QMT交易端'
-  bin_x64: 'C:\BigQMT\work\国金证券QMT交易端\bin.x64'
+  install_root: 'qmt/production_readonly'
+  bin_x64: 'qmt/production_readonly/bin.x64'
   mode: production_readonly
   order_enabled: false
 

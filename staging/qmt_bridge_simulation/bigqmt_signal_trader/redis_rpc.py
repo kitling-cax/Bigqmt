@@ -33,6 +33,7 @@ RPC_REVISION = "20260715-execution-snapshot-v1"
 READ_METHODS = {
     "ping",
     "get_deployment_info",
+    "get_request_outcome",
     "probe_capabilities",
     "probe_order_identity",
     "get_ticks",
@@ -100,6 +101,7 @@ READ_METHODS = {
     "get_last_order_id",
     "get_ipo_data",
     "get_new_purchase_limit",
+    "quote_subscription_status",
     "get_history_trade_detail_data",
     "get_assure_contract",
     "get_enable_short_contract",
@@ -115,6 +117,7 @@ ORDER_METHODS = {
     "submit_order",
     "submit_orders_batch",
     "cancel_order",
+    "cancel_orders_batch",
     # Raw native-passorder passthrough (route 2). Gated behind
     # allow_order_methods like every other write, and deferred to the adjust
     # thread by virtue of not being in READ_METHODS.
@@ -128,6 +131,7 @@ QUOTE_SUBSCRIPTION_METHODS = {
     "subscribe_whole_quote",
     "unsubscribe_whole_quote",
     "quote_keepalive",
+    "quote_unsubscribe_all",
 }
 
 LISTENER_DEFERRED_METHODS = {
@@ -208,6 +212,7 @@ METHOD_ALIASES = {
     "order_stock_batch": "submit_orders_batch",
     "cancel_order_stock": "cancel_order",
     "cancel_order_stock_sysid": "cancel_order",
+    "cancel_order_stock_batch": "cancel_orders_batch",
 }
 
 BUY_ORDER_TYPES = {"23", "STOCK_BUY", "BUY", "B"}
@@ -307,6 +312,7 @@ MARKET_DATA_METHODS = {
     "bsm_iv",
     "get_option_iv",
     "get_option_detail_data",
+    "get_option_detail_data_batch",
     "get_option_undl_data",
     "get_option_undl",
     # 财务扩展 / 因子
@@ -376,6 +382,54 @@ MARKET_DATA_METHODS = {
 # order writes stay gated behind ORDER_METHODS + allow_order_methods.)
 READ_METHODS |= MARKET_DATA_METHODS
 READ_METHODS |= QUOTE_SUBSCRIPTION_METHODS
+
+# Reads that are heavy whatever their arguments (#351): a financial read is
+# 0.8s hot and minutes cold (#104), formula evaluation and factor generation
+# run to completion. In the adjust drain (rpc_background_threads False) every
+# one of these runs ON the strategy thread, and a 1.8s get_market_data_ex is
+# the strategy's own tick_app stopped for 1.8s -- the reason #321 took the
+# LPOP off the adjust thread. Heavy reads instead go to one worker thread:
+# their reply pays the cross-thread GIL handoff (~1 tick per acquisition).
+#
+# What the worker buys depends on how much of the call QMT runs with the GIL
+# released. Measured live (2026-09-22, 100ms tick, each read hammered back to
+# back on the worker, 'adjust cadence' avg / max over 10s windows):
+#
+#     get_full_tick ["SH","SZ"]   read ~200ms   cadence 0.100 / 0.25-0.33s
+#     get_market_data_ex 3 x 4mo 1m  ~500ms     cadence 0.100 / 0.27-0.29s
+#     get_financial_data 10 x 3 tables ~2.1s    cadence 0.100 / ~0.5s
+#     download_history_data2 5 codes ~1.2s      cadence 0.56-0.63 / 1.3-1.5s
+#
+# The first three release the GIL for most of the read: the tick keeps its
+# average and its worst case shrinks from the whole read to a fraction. A
+# download holds the GIL for its whole duration -- the worker changes
+# nothing for the tick and adds a tick or two to the reply -- so download_*
+# stays inline. Trade-context methods (LISTENER_DEFERRED_METHODS) are never
+# in this set: get_trade_detail_data answers empty off the main thread.
+HEAVY_READ_METHODS = frozenset([
+    "get_financial_data",
+    "get_raw_financial_data",
+    "get_factor_data",
+    "gen_factor_index",
+    "call_formula",
+    "get_formula_result",
+    "get_his_option_list_batch",
+    "get_option_detail_data_batch",
+    "get_his_index_data",
+    "get_longhubang",
+])
+
+# Reads that are heavy by SIZE: one code is milliseconds, a market token or a
+# long list is seconds (get_full_tick: 0.29ms per instrument, 1.1s for "SH",
+# 7.4s for all of it; get_market_data_ex: tick period 3.9s per code, a date
+# window of 1m bars 0.3-1.4s). _heavy_by_size decides per request.
+HEAVY_READ_CODE_METHODS = frozenset([
+    "get_ticks",            # get_full_tick
+    "get_market_data",
+    "get_market_data_ex",
+    "get_local_data",
+])
+HEAVY_READ_CODES_THRESHOLD = 20
 
 
 def _maybe_scalar(value):
@@ -490,6 +544,43 @@ def to_jsonable(value):
     return str(value)
 
 
+def _rows_for_this_submit(orders, remark, stock_code, action, submitted_at):
+    """The order rows that can be THIS submit's, earliest first.
+
+    Remark match is necessary but not sufficient (#299): the caller may have
+    reused it. A row also has to be the same stock and, when the row states
+    a side, the same side; and when the row carries an insert time it must
+    not be earlier than the second this submit happened in. Rows are then
+    ordered by insert time, earliest first, so a later reuse of the same
+    remark on the same stock (a grid's next rung, placed while this one was
+    still settling) does not shadow this one. Rows without an insert time
+    keep the terminal's order and come after the timed ones.
+    """
+    want_remark = str(remark or "").strip()
+    stock_code = normalize_stock_code(stock_code)
+    action = str(action or "").upper()
+    not_before = int(submitted_at) if submitted_at else 0
+    matched = []
+    for index, row in enumerate(orders or []):
+        if str(getattr(row, "user_order_id", "") or "").strip() != want_remark:
+            continue
+        if normalize_stock_code(getattr(row, "stock_code", "")) != stock_code:
+            continue
+        row_action = str(getattr(row, "action", "") or "").upper()
+        if row_action and action and row_action != action:
+            continue
+        order_time = 0
+        try:
+            order_time = int(getattr(row, "order_time", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        if order_time > 0 and not_before and order_time < not_before:
+            continue
+        matched.append((order_time <= 0, order_time, index, row))
+    matched.sort(key=lambda item: item[:3])
+    return [item[3] for item in matched]
+
+
 class OrderSettlement(object):
     """One order awaiting its order_sys_id.
 
@@ -505,9 +596,9 @@ class OrderSettlement(object):
     """
 
     __slots__ = ("order_request", "result", "deadline", "attempts", "server_error",
-                 "request", "response")
+                 "request", "response", "submitted_at", "shadow")
 
-    def __init__(self, order_request, result, deadline):
+    def __init__(self, order_request, result, deadline, submitted_at=None, shadow=False):
         self.order_request = order_request
         self.result = result
         self.deadline = deadline
@@ -515,6 +606,19 @@ class OrderSettlement(object):
         self.server_error = ""
         self.request = None
         self.response = None
+        # A shadow settlement (#345) belongs to an order whose reply already
+        # went out (order_stock_async, wait_settlement=False). It is not
+        # answered; it only watches for the order to show up, and when the
+        # deadline passes without it, pushes an order_error so the caller's
+        # on_order_error fires for a refusal the terminal made before creating
+        # any order record (insufficient funds: a dialog on the QMT screen,
+        # no callback, nothing on the wire).
+        self.shadow = bool(shadow)
+        # Wall-clock instant taken BEFORE passorder ran (#299). Anything the
+        # lookup finds that was recorded before this instant -- a watch-table
+        # entry, an order row -- belongs to an earlier order that happened to
+        # carry the same remark, never to this one.
+        self.submitted_at = time.time() if submitted_at is None else float(submitted_at)
 
 
 class CancelSettlement(object):
@@ -530,10 +634,12 @@ class CancelSettlement(object):
     """
 
     __slots__ = ("order_ref", "account_id", "result", "deadline", "attempts",
-                 "request", "response")
+                 "request", "response", "account_type")
 
-    def __init__(self, order_ref, account_id, result, deadline):
+    def __init__(self, order_ref, account_id, result, deadline, account_type=None):
         self.order_ref = order_ref
+        # The type the cancel request named (港股通), read back under it.
+        self.account_type = account_type
         self.account_id = account_id
         self.result = result
         self.deadline = deadline
@@ -576,9 +682,7 @@ class BigQmtRpcHandlers:
         self.order_gateway = order_gateway
         self.position_sync_sink = position_sync_sink
         self.allow_order_methods = bool(allow_order_methods)
-        # AdapterFactory wraps the broker gateway with the same policy used by
-        # the in-process signal worker.  Keep a direct reference so raw
-        # passorder RPC is also stopped before it reaches a delegated method.
+        # Keep the policy at the RPC entry as a second, independent guard.
         self.order_admission = getattr(order_gateway, "admission", None)
         self.quote_subscription_manager = quote_subscription_manager
         # QMT runtime-injected global functions (passorder/get_trade_detail_data/
@@ -592,6 +696,18 @@ class BigQmtRpcHandlers:
         # read "" forever (issue #156 follow-up to #133). Bounded FIFO,
         # same 24h TTL as the Redis store.
         self._order_identity_local = collections.OrderedDict()
+        # Settled-id journal (#299 follow-up): remark -> OrderedDict of the
+        # order_sys_ids already handed out for it, insertion-ordered. The
+        # stock/side/not_before guards compare ARRIVAL times -- of a callback
+        # event, of an order row -- and arrival is not ownership: measured
+        # live 2026-09-14, order 1 settled through the poll while its
+        # order_callback landed a few ms later, i.e. AFTER order 2 (same
+        # remark, same stock, submitted serially) had begun; the fresh
+        # arrival timestamp passed order 2's not_before guard and order 1's
+        # already-returned id answered order 2's settlement. An id this
+        # bridge returned for a remark is that order's forever, and must
+        # never be offered to a later same-remark settlement again.
+        self._settled_sysids_by_remark = collections.OrderedDict()
         # Order settlement. Async by default: blocking here holds the QMT main
         # strategy thread, which serializes every other request behind it and
         # caps throughput at ~2 orders/sec (issue #44).
@@ -667,12 +783,25 @@ class BigQmtRpcHandlers:
             allowed, reason = self.order_admission.evaluate(params, method=method)
             if not allowed:
                 raise PermissionError("BigQMT order admission blocked: %s" % reason)
-        handler = getattr(self, "_handle_%s" % method, None)
-        if handler is None and method in MARKET_DATA_METHODS:
-            return self._handle_market_data_method(method, params)
-        elif handler is None:
-            raise ValueError("rpc method is not implemented: %s" % requested_method)
-        return handler(params)
+        # query_stock_positions is list-shaped in MiniQMT.  It remains an
+        # alias of get_positions for permission and adjust-thread routing, but
+        # needs its own handler so same-contract long/short rows are not
+        # collapsed by the provider's legacy mapping contract.
+        if requested_method == "query_stock_positions":
+            handler = self._handle_query_stock_positions
+        else:
+            handler = getattr(self, "_handle_%s" % method, None)
+        # The account type the caller's StockAccount named, scoped to this
+        # request on this thread: a 港股通 query on a stock account id reads
+        # HUGANGTONG rows instead of STOCK ones (account_type_map).
+        from .account_type_map import request_account_type
+
+        with request_account_type(params.get("account_type")):
+            if handler is None and method in MARKET_DATA_METHODS:
+                return self._handle_market_data_method(method, params)
+            elif handler is None:
+                raise ValueError("rpc method is not implemented: %s" % requested_method)
+            return handler(params)
 
     def _handle_ping(self, params):
         return {
@@ -683,8 +812,23 @@ class BigQmtRpcHandlers:
             "version": _deployed_version(),
             "account_type": self._reported_account_type(
                 params.get("account_id") or self.account_id),
+            # Every type this account may be addressed as (港股通 on a stock
+            # account: ["STOCK", "HUGANGTONG", "SHENGANGTONG"]); the client's
+            # mismatch warning checks its StockAccount type against this list.
+            "account_types": self._reported_account_types(
+                params.get("account_id") or self.account_id),
             "server_time": _dt.datetime.now(),
         }
+
+    def _reported_account_types(self, account_id=None):
+        try:
+            from .account_type_map import account_types_for
+
+            gateway = self.order_gateway
+            default = getattr(gateway, "account_type", "") if gateway is not None else ""
+            return list(account_types_for(account_id or self.account_id, default or "STOCK"))
+        except Exception:
+            return []
 
     def _reported_account_type(self, account_id=None):
         """What this deployment will actually trade as.
@@ -770,8 +914,14 @@ class BigQmtRpcHandlers:
     # 官方文档把 create_sector(parent_node, sector_name, overwrite) 记为 QMT
     # 全局函数，本仓库却按 ContextInfo.create_sector(sectorname, stocklist) 调。
     # 只探测存在性，不调用：create_sector 是写操作。
+    #
+    # get_market_data_ex_ori 是 #237 补进来的：适配层「有原始接口就只走它」，
+    # 所以两台终端跑的可能是两条完全不同的代码路径 —— 而名单里没有这个名字时，
+    # probe 永远不报它，报告人和维护者都拿它当「两边一样」的证据，白白多走了两
+    # 轮。名单本身就是判据，缺一个名字等于把这条差异藏起来。
     _PROBE_CONTEXT_METHODS = (
-        "get_full_tick", "get_market_data_ex", "get_market_data", "get_local_data",
+        "get_full_tick", "get_market_data_ex", "get_market_data_ex_ori",
+        "get_market_data", "get_local_data",
         "subscribe_quote", "subscribe_whole_quote", "unsubscribe_quote",
         "get_trading_dates", "get_financial_data", "get_stock_list_in_sector",
         "do_back_test", "get_trade_detail_data",
@@ -858,8 +1008,10 @@ class BigQmtRpcHandlers:
             "cached_rows": len(getattr(self, "_credit_account_rows", []) or []),
             "last_callback_thread": getattr(self, "_credit_account_callback_thread", ""),
         }
+        info["ctypes_probe"] = self._probe_ctypes_named_pipe()
         info["thread_routing"] = self._probe_thread_routing()
         info["sector_probe"] = self._probe_sector_channels()
+        info["download_probe"] = self._probe_download_channels(params)
         info["order_watch"] = self._probe_order_watch()
         info["reply_residency"] = self._probe_reply_residency()
         return info
@@ -1084,6 +1236,73 @@ class BigQmtRpcHandlers:
                               "之外就是这个样子，查 thread_routing")
         return report
 
+    def _probe_ctypes_named_pipe(self):
+        """QMT 的导入白名单放不放行 ctypes + kernel32 命名管道。
+
+        白名单拒过 socket（还包括 logging.handlers 间接引入的那次），所以在
+        某些券商终端上 redis / pyzmq 都装不进去，桥根本没有线可用。命名管道
+        走 ctypes.WinDLL("kernel32")，是标准库、也不是 socket —— 如果放行，
+        它就是那类终端上唯一能用的传输。
+
+        这一条只能在 QMT 沙箱里问：用终端自带解释器 import 只测得到解释器，
+        测不到 QMT 运行时的白名单。逐级探测，每一级失败都记下原因，因为
+        「import 过了」不等于「建得出管道」——DLL 载入和内核对象创建是两回事。
+        """
+        report = {}
+        try:
+            import ctypes
+            report["import_ctypes"] = True
+        except Exception as exc:
+            report["import_ctypes"] = False
+            report["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+            return report
+        try:
+            from ctypes import wintypes  # noqa: F401
+            report["import_wintypes"] = True
+        except Exception as exc:
+            report["import_wintypes"] = False
+            report["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+            return report
+        try:
+            dll = ctypes.WinDLL("kernel32", use_last_error=True)
+            report["load_kernel32"] = True
+        except Exception as exc:
+            report["load_kernel32"] = False
+            report["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+            return report
+        for func in ("CreateNamedPipeW", "ConnectNamedPipe", "ReadFile",
+                     "WriteFile", "CancelIoEx", "CreateFileW"):
+            try:
+                report["fn_" + func] = bool(getattr(dll, func))
+            except Exception:
+                report["fn_" + func] = False
+        # 真去建一个管道再立刻关掉。这一步才是「能不能用」的答案：DLL 载入
+        # 成功不代表内核允许创建命名管道对象（组策略/沙箱可能单独拦）。
+        try:
+            from ctypes import wintypes
+
+            dll.CreateNamedPipeW.restype = wintypes.HANDLE
+            path = "%s%s" % (chr(92) * 2 + "." + chr(92) + "pipe" + chr(92),
+                             "bigqmt_whitelist_probe")
+            handle = dll.CreateNamedPipeW(path, 0x00000003,
+                                          0x00000004 | 0x00000002 | 0x00000000,
+                                          1, 4096, 4096, 0, None)
+            invalid = ctypes.c_void_p(-1).value
+            if handle == invalid:
+                report["create_pipe"] = False
+                report["create_pipe_error"] = ctypes.get_last_error()
+            else:
+                report["create_pipe"] = True
+                report["pipe_path"] = path
+                try:
+                    dll.CloseHandle(handle)
+                except Exception:
+                    pass
+        except Exception as exc:
+            report["create_pipe"] = False
+            report["create_pipe_error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        return report
+
     def _probe_thread_routing(self):
         """哪些方法跑在后台 listener 线程上，哪些被推回 adjust 主线程。
 
@@ -1123,6 +1342,28 @@ class BigQmtRpcHandlers:
                 except Exception as exc:
                     sample[name] = "unknown: %s" % exc.__class__.__name__
             report["sample"] = sample
+        # #351: in the adjust drain, heavy reads go to the worker thread.
+        heavy_thread = getattr(service, "_heavy_thread", None)
+        report["background_threads"] = bool(getattr(service, "background_threads", True))
+        report["heavy_offload"] = bool(getattr(service, "heavy_offload", False))
+        report["heavy_worker_alive"] = bool(heavy_thread is not None and heavy_thread.is_alive())
+        is_heavy = getattr(service, "is_heavy_read", None)
+        if callable(is_heavy):
+            heavy_sample = {}
+            for name, params in (
+                    ("get_full_tick", {"codes": ["600000.SH"]}),
+                    ("get_full_tick[SH]", {"codes": ["SH"]}),
+                    ("get_market_data_ex[count=5]", {"stock_list": ["600000.SH"], "count": 5}),
+                    ("get_market_data_ex[tick]", {"stock_list": ["600000.SH"], "period": "tick"}),
+                    ("get_financial_data", {"stock_list": ["600000.SH"]}),
+                    ("download_history_data2", {"stock_list": ["600000.SH"]}),
+                    ("get_positions", {})):
+                try:
+                    heavy_sample[name] = ("heavy_worker" if is_heavy(name.split("[")[0], params)
+                                          else "inline")
+                except Exception as exc:
+                    heavy_sample[name] = "unknown: %s" % exc.__class__.__name__
+            report["heavy_sample"] = heavy_sample
         return report
 
     def _probe_credit_account_object(self):
@@ -1281,6 +1522,25 @@ class BigQmtRpcHandlers:
                 "error": "%s: %s" % (exc.__class__.__name__, exc)}
         return report
 
+    def _probe_download_channels(self, params):
+        """财务下载通道探测（#277）：「接口暴露」和「独立更新可用」分开报。
+
+        大 QMT 终端里 miniQMT（58610 行情服务）不在时，`download_financial_data`
+        照样 callable、已有财务行照样读得到，真下载却报 `无法连接行情服务`。
+        只看函数存在性的能力表把这种终端报成「可用」，正是 #277 的报告人遇到
+        的：财务库读得到、更新不了、能力表说没问题。
+
+        这里真发一次小范围下载（一只代码、一张表、30 天窗口）看结果。传
+        `download_probe=false` 可以跳过那次拨号（服务不在时它要付 2~3 秒的
+        连接超时），此时只报暴露情况，verdict 是 `exposed_untested`。
+        """
+        flag = (params or {}).get("download_probe", True)
+        dial = str(flag).strip().lower() not in ("0", "false", "no", "off")
+        try:
+            return self.market_data.probe_download_channels(dial=dial)
+        except Exception as exc:
+            return {"error": "%s: %s" % (exc.__class__.__name__, exc)}
+
     # ------------------------------------------------------------------
     # 全推行情订阅控制（引用计数共享 ContextInfo.subscribe_whole_quote）。
     # 数据本身走推送通道；这里只负责订阅生命周期 + 心跳。
@@ -1322,6 +1582,25 @@ class BigQmtRpcHandlers:
         client_id, sub_id, _codes = self._quote_params(params)
         manager.keepalive(client_id, sub_id)
         return {}
+
+    def _handle_quote_subscription_status(self, params):
+        """Read-only: what is subscribed, by how many clients, and how stale.
+
+        The answer to "I lost my seq and something is still pushing": a combo
+        that stays fresh has a LIVE keepalive feeding it (a leftover client
+        process, not a leak); one going silent past the heartbeat timeout is
+        about to be reaped.
+        """
+        return self._require_quote_manager().status()
+
+    def _handle_quote_unsubscribe_all(self, params):
+        """Operator kill switch: tear every combo down without needing a seq.
+
+        keepalive is a no-op on unknown sub_ids, so a force-cleared combo
+        stays down until someone subscribes again.
+        """
+        manager = self._require_quote_manager()
+        return {"unsubscribed": manager.unsubscribe_all()}
 
     def _identity_redis(self):
         """Redis for the order-identity store, or None.
@@ -1451,6 +1730,16 @@ class BigQmtRpcHandlers:
 
     def _handle_get_positions(self, params):
         return self.position_provider.get_positions(self._request_account_id(params))
+
+    def _handle_query_stock_positions(self, params):
+        account_id = self._request_account_id(params)
+        list_positions = getattr(self.position_provider, "list_positions", None)
+        if callable(list_positions):
+            return list_positions(account_id)
+        positions = self.position_provider.get_positions(account_id)
+        if isinstance(positions, dict):
+            return list(positions.values())
+        return list(positions or [])
 
     def _handle_get_position_statistics(self, params):
         return self.position_provider.get_position_statistics(self._request_account_id(params))
@@ -1850,8 +2139,35 @@ class BigQmtRpcHandlers:
         return self._query_trade_detail(params, "ACCOUNT")
 
     def _handle_query_account_status(self, params):
-        # 账户状态 — 用 TASK detail type 近似（委托任务状态）
-        return self._query_trade_detail(params, "TASK")
+        # 账户状态。Big QMT 没有原生账号状态结构——官方 strDatatype 只有
+        # ACCOUNT / POSITION / POSITION_STATISTICS / ORDER / DEAL / TASK，
+        # TASK 是委托任务状态，占位实现期误用了它：没有进行中的委托任务时恒
+        # 空，和「账号状态查不到」是两回事（issue #272）。
+        #
+        # 能拿到的最近真源是 ACCOUNT 行的 m_Enable：
+        #   账户存在且可用   -> ACCOUNT_STATUS_OK(0)
+        #   账户存在但不可用 -> ACCOUNT_STATUS_FAIL(3)
+        #   没有 ACCOUNT 行  -> 空列表（账号不存在）
+        # MiniQMT 更丰富的状态（WAITING_LOGIN / INITING / CORRECTING / CLOSED）
+        # 在大 QMT 的接口面上观察不到，别在这里编造。
+        rows = self._query_trade_detail(params, "ACCOUNT")
+        account_id = self._request_account_id(params)
+        account_type = self._reported_account_type()
+        out = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                enabled = row.get("m_Enable")
+                row_account = row.get("m_strAccountID")
+            else:
+                enabled = getattr(row, "m_Enable", None)
+                row_account = getattr(row, "m_strAccountID", None)
+            out.append({
+                "account_id": str(row_account or account_id),
+                "account_type": account_type,
+                "status": 0 if enabled else 3,
+                "status_msg": "" if enabled else "account disabled (m_Enable=False)",
+            })
+        return out
 
     def _handle_query_credit_detail(self, params):
         # 信用（两融）账户明细 — get_trade_detail_data(accId, 'CREDIT', 'ACCOUNT')
@@ -2033,15 +2349,25 @@ class BigQmtRpcHandlers:
                 start_time = str(params.get("start_time") or "")
                 end_time = str(params.get("end_time") or "")
                 result = func(stock_code, period, start_time, end_time)
-                return bool(result) if result is not None else True
+                if result is not None and not result:
+                    raise RuntimeError(
+                        "download_history_data: terminal rejected the task "
+                        "(native return %r) code=%s period=%s"
+                        % (result, stock_code, period))
+                return True
             except Exception as exc:
                 raise RuntimeError("download_history_data failed: %s" % exc)
         # Fallback: adapter tries native xtdata SDK then ContextInfo.
-        # If the adapter lacks the method, return False (not crash).
+        # #339: no channel at all must raise (the #47 contract: failure is
+        # loud), not return False — a silent False became the client's fake
+        # finished==total progress over zero landed rows.
         try:
             return self._handle_market_data_method("download_history_data", params)
         except (NotImplementedError, AttributeError):
-            return False
+            raise RuntimeError(
+                "download_history_data: no download channel on this terminal "
+                "(download_history_data/down_history_data unbound, ContextInfo "
+                "has no download method) -- check probe_capabilities qmt_globals")
 
     def _handle_download_history_data2(self, params):
         """download_history_data2 is a QMT global function (issue #32).
@@ -2068,22 +2394,42 @@ class BigQmtRpcHandlers:
                     result = func(stock_list, period, start_time, end_time, lambda data: None)
                 except TypeError:
                     result = func(stock_list, period, start_time, end_time)
-                return bool(result) if result is not None else True
+                if result is not None and not result:
+                    raise RuntimeError(
+                        "terminal rejected the download task (native return %r) "
+                        "codes=%d period=%s" % (result, len(stock_list), period))
+                return True
             except Exception as exc:
                 raise RuntimeError("download_history_data2 failed: %s" % exc)
         single = self.qmt_api.get("download_history_data") or self.qmt_api.get("down_history_data")
         if single is not None:
-            try:
-                result = None
-                for code in stock_list:
+            rejected = []
+            errors = []
+            for code in stock_list:
+                try:
                     result = single(code, period, start_time, end_time)
-                return bool(result) if result is not None else True
-            except Exception as exc:
-                raise RuntimeError("download_history_data2 per-code fallback failed: %s" % exc)
+                except Exception as exc:
+                    errors.append("%s: %s" % (code, exc))
+                    continue
+                if result is not None and not result:
+                    rejected.append(code)
+            if errors or rejected:
+                raise RuntimeError(
+                    "download_history_data2 per-code fallback failed "
+                    "(rejected=%s errors=%s)" % (",".join(rejected) or "-",
+                                                 "; ".join(errors) or "-"))
+            return True
+        # #339: was `return False` — a constant False with no channel is the
+        # exact shape that became the client's fake finished==total progress.
+        # Failure must raise (the #47 contract).
         try:
             return self._handle_market_data_method("download_history_data2", params)
         except (NotImplementedError, AttributeError):
-            return False
+            raise RuntimeError(
+                "download_history_data2: no download channel on this terminal "
+                "(download_history_data2/download_history_data/down_history_data "
+                "all unbound; ContextInfo has no download method) -- check "
+                "probe_capabilities qmt_globals")
 
     def _handle_probe_order_identity(self, params):
         """Diagnose the strategy_name backfill chain, one link at a time.
@@ -2159,25 +2505,27 @@ class BigQmtRpcHandlers:
         if order_type in SELL_ORDER_TYPES:
             return "SELL"
         # Credit operations carry their side in the type itself (issue #103).
-        # 直接还款 moves cash rather than securities and has no side, so it
-        # still needs an explicit action rather than being guessed at.
+        # 直接还款 (32/45) moves cash rather than securities and has no side.
+        # It used to demand an explicit action -- but MiniQMT's order_stock
+        # has no action parameter, so the compat caller could never supply
+        # one and 归还融资 was simply unusable (#314). The side is bookkeeping
+        # only: passorder gets the raw opType, and the settlement lookup does
+        # not filter sideless types by side.
         credit = _credit_action_of(raw)
         if credit:
             return credit
         if _credit_optype_of(raw) is not None:
-            raise ValueError(
-                "order_type %s has no implicit buy/sell side; pass action "
-                "explicitly" % raw)
+            return _sideless_default_action()
         # Futures (0-15) and ETF option (50-59) opTypes carry the side in the
-        # type itself. 行权/锁定 (56-59) do not, so they fall through to the
-        # same "pass action explicitly" rejection as 直接还款.
+        # type itself. 行权/锁定 (56-59) do not; same treatment as 直接还款.
         passthrough = _passthrough_action_of(raw)
         if passthrough:
             return passthrough
         if _passthrough_optype_of(raw) is not None:
-            raise ValueError(
-                "order_type %s has no implicit buy/sell side; pass action "
-                "explicitly" % raw)
+            return _sideless_default_action()
+        # 可转债 转股 / 回售 (80-83): no side either.
+        if _convertible_optype_of(raw) is not None:
+            return _sideless_default_action()
         if raw in (None, ""):
             raise ValueError("action or order_type is required")
         # An order_type WAS supplied and was not recognised. Saying "required"
@@ -2219,10 +2567,25 @@ class BigQmtRpcHandlers:
             return raw
         if _passthrough_optype_of(raw) is not None:
             return raw
+        if _convertible_optype_of(raw) is not None:
+            return raw
         return None
 
     # 旧名保留：外部调用方和既有测试还在用
     _credit_order_type_from_params = _forwarded_order_type
+
+    def _resolve_strategy_name(self, *candidates):
+        """First supplied candidate wins; "" is a real answer, not "unset".
+
+        ``or`` chains used to swallow an explicit empty string back into
+        ``default_strategy_name``. Blank is exactly how a caller asks for an
+        empty 报单来源 column, the way a hand-placed order looks (#154), so
+        only a missing value (``None``) may fall through to the default.
+        """
+        for candidate in candidates:
+            if candidate is not None:
+                return str(candidate)
+        return str(self.default_strategy_name)
 
     def _handle_submit_order(self, params):
         if self.order_gateway is None:
@@ -2240,17 +2603,33 @@ class BigQmtRpcHandlers:
             volume=int(params.get("volume") or params.get("order_volume") or 0),
             price=float(price if price not in (None, "") else 0),
             price_type=params.get("price_type") or "LIMIT",
-            strategy_name=str(params.get("strategy_name")
-                              or self.default_strategy_name),
+            strategy_name=self._resolve_strategy_name(
+                params.get("strategy_name")),
             remark=order_tag,
             order_type=self._forwarded_order_type(params),
+            account_type=self._configured_account_type(self._request_account_id(params)),
         )
         if request.action not in ("BUY", "SELL"):
             raise ValueError("action must be BUY or SELL")
         if not request.stock_code:
             raise ValueError("stock_code is required")
         if request.volume <= 0:
+            if _is_cash_repay_order_type(request.order_type):
+                # #330: the caller put the amount in price. Big QMT's
+                # passorder carries 直接还款's amount in the VOLUME slot
+                # (integer yuan) and ignores price; MiniQMT's signature
+                # has no other slot for it either.
+                raise ValueError(
+                    "直接还款 (order_type %s): the repayment amount goes in "
+                    "order_volume as integer yuan, price is ignored -- got "
+                    "order_volume=%r price=%r. Example: order_stock(acc, code, "
+                    "CREDIT_DIRECT_CASH_REPAY, 10000, FIX_PRICE, 0, ...)"
+                    % (request.order_type, params.get("volume", params.get("order_volume")),
+                       params.get("price")))
             raise ValueError("volume must be positive")
+        if _is_cash_repay_order_type(request.order_type) and request.price > 0:
+            print("%s 直接还款: amount=%d taken from order_volume; price=%r is ignored "
+                  "by passorder (#330)" % ("[bigqmt_rpc]", request.volume, request.price))
 
         try:
             from .exec_events import remember_order_identity
@@ -2269,6 +2648,10 @@ class BigQmtRpcHandlers:
         self._remember_order_identity_local(
             request.account_id, request.remark, request.strategy_name)
 
+        # Taken before passorder so every callback / row this order produces
+        # is at or after it; an entry from an earlier same-remark order is
+        # strictly before it (#299).
+        submitted_at = time.time()
         result = self.order_gateway.submit(request)
 
         # 委托后校验：确认委托是否真的进了系统。passorder 调用成功但委托没进
@@ -2287,6 +2670,17 @@ class BigQmtRpcHandlers:
         # post-submit "did it land?" check is skipped, and a silent rejection
         # surfaces as the absence of that push rather than as server_error.
         if not _bool_value(params.get("wait_settlement"), True):
+            # Reply now, but keep watching (#345): a refusal before any order
+            # record exists is otherwise invisible to an async caller. Kept
+            # apart from the single reply slot, so a batch (#181) can shadow
+            # every item and the reply is never held.
+            if not self.settle_orders_inline:
+                shadows = getattr(self, "_pending_shadow_settlements", None)
+                if shadows is None:
+                    shadows = self._pending_shadow_settlements = []
+                shadows.append(OrderSettlement(
+                    request, result, _monotonic() + self.order_settle_timeout_seconds,
+                    submitted_at=submitted_at, shadow=True))
             return result
 
         if self.settle_orders_inline:
@@ -2296,7 +2690,8 @@ class BigQmtRpcHandlers:
                 import time as _time
                 _time.sleep(self.order_settle_timeout_seconds)
                 self._apply_order_lookup(
-                    OrderSettlement(request, result, 0.0), final=True, inline=True)
+                    OrderSettlement(request, result, 0.0, submitted_at=submitted_at),
+                    final=True, inline=True)
             except Exception:
                 pass
             return result
@@ -2304,9 +2699,56 @@ class BigQmtRpcHandlers:
         # a plain function for anyone driving handlers directly, and only the
         # service defers its reply.
         self._pending_settlement = OrderSettlement(
-            request, result, _monotonic() + self.order_settle_timeout_seconds
+            request, result, _monotonic() + self.order_settle_timeout_seconds,
+            submitted_at=submitted_at,
         )
         return result
+
+    def _exec_event_sink(self):
+        """Where an exec event this handler emits goes: redis, else the quote
+        push channel, else None."""
+        redis_client = self._identity_redis()
+        if redis_client is not None:
+            return redis_client
+        manager = getattr(self, "quote_subscription_manager", None)
+        publisher = getattr(manager, "_on_push_publisher", None)
+        if callable(publisher):
+            class _PushSink(object):
+                def publish(self_, topic, data):
+                    return publisher(topic, data)
+            return _PushSink()
+        return None
+
+    def publish_order_error(self, request, error_msg):
+        """Push on_order_error for an order refused before any record (#345)."""
+        sink = self._exec_event_sink()
+        if sink is None:
+            return False
+        from .exec_events import publish_exec_event
+
+        event = {
+            "event_type": "order_error",
+            "account_id": str(request.account_id or ""),
+            "stock_code": str(request.stock_code or ""),
+            "order_sys_id": "",
+            "error_id": -1,
+            "status": 57,
+            "order_remark": str(request.remark or ""),
+            "user_order_id": str(request.remark or ""),
+            "strategy_name": str(request.strategy_name or ""),
+            "error_msg": str(error_msg or ""),
+            "source": "settlement",
+            "created_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": time.time(),
+        }
+        publish_exec_event(sink, event["account_id"], event)
+        return True
+
+    def take_shadow_settlements(self):
+        """Pop the shadow settlements the last request registered (#345)."""
+        shadows = getattr(self, "_pending_shadow_settlements", None) or []
+        self._pending_shadow_settlements = []
+        return shadows
 
     def take_pending_settlement(self):
         """Pop the settlement the last submit_order registered, if any."""
@@ -2314,34 +2756,115 @@ class BigQmtRpcHandlers:
         self._pending_settlement = None
         return settlement
 
-    def _apply_order_lookup(self, settlement, final=False, inline=False):
+    # Bounded like the watch table: a remark reused all day (a grid's rungs)
+    # accumulates one entry per settled order.
+    _SETTLED_MAX_REMARKS = 2000
+    _SETTLED_MAX_PER_REMARK = 1000
+
+    def _remember_settled_sysid(self, remark, sysid):
+        """An id handed out for ``remark`` is spent; never offer it again."""
+        remark = str(remark or "").strip()
+        sysid = str(sysid or "").strip()
+        if not remark or not sysid:
+            return
+        ids = self._settled_sysids_by_remark.get(remark)
+        if ids is None:
+            ids = collections.OrderedDict()
+            self._settled_sysids_by_remark[remark] = ids
+        else:
+            self._settled_sysids_by_remark.move_to_end(remark)
+        ids[sysid] = True
+        while len(ids) > self._SETTLED_MAX_PER_REMARK:
+            ids.popitem(last=False)
+        while len(self._settled_sysids_by_remark) > self._SETTLED_MAX_REMARKS:
+            self._settled_sysids_by_remark.popitem(last=False)
+
+    def _sysid_already_settled(self, remark, sysid):
+        remark = str(remark or "").strip()
+        sysid = str(sysid or "").strip()
+        if not remark or not sysid:
+            return False
+        ids = self._settled_sysids_by_remark.get(remark)
+        return bool(ids) and sysid in ids
+
+    def _apply_order_lookup(self, settlement, final=False, inline=False, orders_cache=None):
         """Look the order up by remark. True when settled, False to retry.
 
         MUST run on the main strategy thread -- get_trade_detail_data returns
         empty anywhere else.
+
+        ``orders_cache`` ((account_id, account_type) -> rows) lets one settle
+        pass share a single ORDER snapshot across every pending settlement
+        (#303). A final lookup always reads fresh: its verdict is "not in the
+        system", and that must not rest on a list fetched for someone else.
+
+        Runs under the type the order was placed as: a 港股通 order on a stock
+        account is in the HUGANGTONG list, not the STOCK one.
         """
+        from .account_type_map import request_account_type
+
+        with request_account_type(getattr(settlement.order_request, "account_type", None)):
+            return self._apply_order_lookup_as_requested(
+                settlement, final=final, inline=inline, orders_cache=orders_cache)
+
+    def _apply_order_lookup_as_requested(self, settlement, final=False, inline=False,
+                                         orders_cache=None):
         request = settlement.order_request
         settlement.attempts += 1
         # Fast path: QMT's order_callback already pushed the answer
         # (issue #164). A miss means nothing -- fall through to the poll.
+        # Remarks are not unique. The auto-generated "bqrpc:<uuid>" is, but a
+        # caller-supplied one is reused freely -- grid strategies, serial
+        # scripts ("串行买入600股" across three stocks and two batches, #299).
+        # Matching on the remark alone returned the most recent OTHER order
+        # that carried it, and the caller then filtered every real callback
+        # out by that wrong id and treated three fills as unplaced. So every
+        # candidate must also be this request's stock and side, must not
+        # predate this submit, AND must not be an id this bridge already
+        # settled for this remark -- a callback's arrival time says nothing
+        # about which order it belongs to, so the previous order's callback
+        # can land after this submit began and still carry an id that is
+        # spent (live ICBC repro, 2026-09-14, seconds after #300 shipped).
+        want_code = normalize_stock_code(request.stock_code)
+        want_action = str(request.action or "").upper()
+        if _is_sideless_order_type(getattr(request, "order_type", None)):
+            # 直接还款 / 行权 / 锁定 have no side (#314): the recorded action
+            # is a bookkeeping default, and whatever side the terminal's row
+            # reports must not disqualify it.
+            want_action = ""
         watch = getattr(self, "order_watch_table", None)
         if watch is not None:
             try:
-                watched_sysid = watch.sysid_for_remark(request.remark)
+                watched_sysid = watch.sysid_for_remark(
+                    request.remark, stock_code=want_code, action=want_action,
+                    not_before=settlement.submitted_at)
             except Exception:
                 watched_sysid = None
+            if watched_sysid and self._sysid_already_settled(
+                    request.remark, watched_sysid):
+                watched_sysid = None  # spent id -- fall through to the poll
             if watched_sysid:
                 try:
                     settlement.result.order_sys_id = watched_sysid
                 except Exception:
                     pass
+                self._remember_settled_sysid(request.remark, watched_sysid)
                 return True
         try:
-            orders = self.order_gateway.query_orders(request.account_id, "") or []
+            orders = None
+            cache_key = (request.account_id, getattr(request, "account_type", None) or "")
+            if orders_cache is not None and not final:
+                orders = orders_cache.get(cache_key)
+            if orders is None:
+                orders = self.order_gateway.query_orders(request.account_id, "") or []
+                if orders_cache is not None:
+                    orders_cache[cache_key] = orders
+            by_remark = _rows_for_this_submit(
+                orders, request.remark, want_code, want_action, settlement.submitted_at)
             by_remark = [
-                o for o in orders
-                if str(getattr(o, "user_order_id", "") or "").strip() == request.remark.strip()
-            ]
+                row for row in by_remark
+                if not self._sysid_already_settled(
+                    request.remark, str(getattr(row, "order_sys_id", "") or ""))]
             if by_remark:
                 sysid = str(getattr(by_remark[0], "order_sys_id", "") or "")
                 if sysid:
@@ -2349,6 +2872,7 @@ class BigQmtRpcHandlers:
                         settlement.result.order_sys_id = sysid
                     except Exception:
                         pass
+                    self._remember_settled_sysid(request.remark, sysid)
                     return True
                 # The row is there but m_strOrderSysID is not populated yet.
                 # Settling here publishes order_sys_id=None, the client turns
@@ -2362,7 +2886,7 @@ class BigQmtRpcHandlers:
                 message = (
                     "ORDER IS LIVE -- DO NOT RESUBMIT. passorder reached the "
                     "broker and the order row exists (stock=%s action=%s "
-                    "price=%.2f volume=%d), but QMT had still not assigned "
+                    "price=%s volume=%d), but QMT had still not assigned "
                     "order_sys_id after %d lookup(s), so this reply carries no "
                     "id. Find it by remark %r, or in the 委托 list; it is not a "
                     "rejection (issue #152)."
@@ -2377,28 +2901,66 @@ class BigQmtRpcHandlers:
                 # Not there yet. QMT assigns the id asynchronously, so an early
                 # miss is normal -- only a miss at the deadline is a real one.
                 return False
-            # Deadline reached with no remark match -> not in the system. Do NOT
-            # fall back to matching stock_code+action: order_tag is a unique id
-            # we generated, so a miss is always a real miss, while an unrelated
-            # order on the same stock and side (a manual one, or an earlier
-            # unfilled order) would silently suppress this warning and leave
-            # order_sys_id unfilled with no signal at all (issue #41).
-            # The first thing to check is the strategy's run mode, not the
-            # order. QMT's 模型交易 list has a 运行模式 column that defaults to
-            # 模拟, and in that mode passorder matches internally and never
-            # reaches the broker: the call succeeds, SUBMITTED comes back, and
-            # every lookup finds nothing. This message used to lead with
-            # "check price range / permissions", and a reporter spent two
-            # hours there before finding the mode (issue #122).
+            if _is_cash_repay_order_type(getattr(request, "order_type", None)):
+                # 直接还款 (#330): the repayment went through and no row with
+                # this remark ever showed in the ORDER list (a partial repay
+                # measured live: 100 of 1000 repaid, then "not found in
+                # system" raised at the caller). A cash repayment is not a
+                # securities order; the terminal keeps no order record the
+                # bridge can settle against. No id, no error: order_stock
+                # answers -1 without raising, and the caller verifies via
+                # query_credit_detail.
+                try:
+                    settlement.result.message = (
+                        "直接还款 submitted; the terminal keeps no order row for a "
+                        "cash repayment, so no order_sys_id -- verify with "
+                        "query_credit_detail")
+                except Exception:
+                    pass
+                return True
+            # Deadline reached with no remark match. Do NOT fall back to
+            # matching stock_code+action (issue #41). But a deadline miss is
+            # NOT proof of refusal either: on a live terminal the ORDER row /
+            # order_callback can arrive seconds after ANY fixed window
+            # (measured +4.1s during market hours, issue #360 — the order was
+            # live and filled while the caller was told "not found"). So the
+            # synchronous verdict is "unconfirmed", not "failed": answer ok
+            # with no id and keep watching as a shadow settlement on an
+            # extended deadline. Only a miss at the END of that extended window
+            # is reported as a refusal. (inline mode has no drain loop to keep
+            # watching on, so it keeps the old immediate verdict.)
+            if not settlement.shadow and not inline:
+                settlement.shadow = True
+                settlement.deadline = _monotonic() + max(
+                    4.0 * float(getattr(self, "order_settle_timeout_seconds", 3.0)), 10.0)
+                try:
+                    settlement.result.message = (
+                        "submitted but UNCONFIRMED after %d lookup(s): no order "
+                        "row yet. This can be plain callback latency (observed "
+                        ">4s on a live terminal during market hours, #360) -- "
+                        "DO NOT RESUBMIT. Watch order_callback / the 委托 list "
+                        "for the id; if the extended watch also misses, an "
+                        "order_error push follows (#345)." % settlement.attempts)
+                except Exception:
+                    pass
+                return True
+            # Extended-window (or inline) miss -> now it is a refusal. The first
+            # thing to check is still the strategy's run mode (#122), but the
+            # late-callback cause is real too (#360).
             message = (
                 "passorder submitted but order not found in system "
-                "(stock=%s action=%s price=%.2f volume=%d, %d lookup(s)). "
-                "FIRST check the strategy's run mode: in QMT's 模型交易 list the "
-                "运行模式 column defaults to 模拟, where passorder matches "
-                "internally and never reaches the broker -- switch it to 实盘 "
-                "(a simulated account stays simulated). The editor window and "
-                "backtest/signal modes place no real order either. If the mode "
-                "is already 实盘, then check price range and permissions."
+                "(stock=%s action=%s price=%s volume=%d, %d lookup(s) including "
+                "an extended watch). FIRST check the strategy's run mode: in "
+                "QMT's 模型交易 list the 运行模式 column defaults to 模拟, where "
+                "passorder matches internally and never reaches the broker -- "
+                "switch it to 实盘 (a simulated account stays simulated; the "
+                "editor window and backtest/signal modes place no real order "
+                "either). Second: the terminal refused the order BEFORE "
+                "creating a record -- insufficient funds/position, price range, "
+                "permissions: it shows a dialog on the QMT screen and fires no "
+                "callback (#345). Third: the ORDER row / order_callback was "
+                "simply late -- observed >4s on a live terminal during market "
+                "hours (#360). Check the 委托 list before resubmitting."
                 % (request.stock_code, request.action, request.price,
                    request.volume, settlement.attempts)
             )
@@ -2419,10 +2981,9 @@ class BigQmtRpcHandlers:
         batch_started = time.time()
         batch_id = str(params.get("batch_id") or uuid.uuid4().hex)
         account_id = self._request_account_id(params)
-        strategy_name = str(
-            params.get("strategy_name")
-            or (orders[0] or {}).get("strategy_name")
-            or self.default_strategy_name
+        strategy_name = self._resolve_strategy_name(
+            params.get("strategy_name"),
+            (orders[0] or {}).get("strategy_name"),
         )
         # order_stock_async routes a queued backlog through here (#181), but it
         # never promised order_stock_batch's idempotency contract, and
@@ -2654,41 +3215,24 @@ class BigQmtRpcHandlers:
             strategy_name = str(
                 params.get("strategy_name") or self.default_strategy_name).strip()
             if not strategy_name:
-                raise PermissionError(
-                    "cancel requires an allowlisted strategy_name")
-            # Fail closed unless the broker's own current order facts confirm
-            # that this id belongs to the approved strategy.  A caller-supplied
-            # strategy name alone must not be able to cancel a manual or other
-            # strategy's order in the same account.
+                raise PermissionError("cancel requires an allowlisted strategy_name")
             try:
-                raw_orders = self.order_gateway.query_orders_strict(
-                    account_id, "") or []
-                strategy_orders = self._attribute_to_strategies(
-                    account_id, raw_orders)
+                raw_orders = self.order_gateway.query_orders_strict(account_id, "") or []
+                strategy_orders = self._attribute_to_strategies(account_id, raw_orders)
             except Exception as exc:
-                raise PermissionError(
-                    "cancel ownership query failed: %s" % exc)
+                raise PermissionError("cancel ownership query failed: %s" % exc)
             owned = [
                 item for item in strategy_orders
                 if str(getattr(item, "order_sys_id", "") or "") == order_sys_id
-                and str(getattr(item, "strategy_name", "") or "").strip()
-                == strategy_name
+                and str(getattr(item, "strategy_name", "") or "").strip() == strategy_name
             ]
             if not owned:
                 raise PermissionError(
                     "cancel blocked: broker order is not attributable to strategy %s"
                     % strategy_name)
             result = self.order_gateway.cancel(
-                order_ref,
-                account_id=account_id,
-                strategy_name=strategy_name,
-            )
+                order_ref, account_id=account_id, strategy_name=strategy_name)
         else:
-            # Backward compatibility for third-party gateways that implement
-            # the historical two-argument cancel signature.  The RPC-level
-            # method permission above has already been checked.  Do not catch
-            # TypeError from a real cancel call: retrying after an ambiguous
-            # exception could submit a duplicate cancel request.
             result = self.order_gateway.cancel(order_ref, account_id=account_id)
 
         # The native cancel return is not trustworthy in EITHER direction.
@@ -2705,6 +3249,7 @@ class BigQmtRpcHandlers:
             account_id,
             result,
             _monotonic() + self.order_settle_timeout_seconds,
+            account_type=self._configured_account_type(account_id),
         )
         if getattr(result, "success", None) is not False:
             try:
@@ -2722,6 +3267,60 @@ class BigQmtRpcHandlers:
         else:
             self._pending_settlement = settlement
         return result
+
+    def _handle_cancel_orders_batch(self, params):
+        """Cancel N orders in one RPC.
+
+        Settlement lookups are skipped (same reason as submit_orders_batch:
+        get_trade_detail_data is empty off the adjust thread). The cancel
+        callback on the client confirms the outcome asynchronously.
+        """
+        if self.order_gateway is None:
+            raise RuntimeError("order_gateway is not configured")
+        items = params.get("items") or []
+        if not isinstance(items, list) or not items:
+            raise ValueError("items must be a non-empty list")
+        if len(items) > 500:
+            raise ValueError("items exceeds batch limit 500")
+        results = []
+        for index, item in enumerate(items):
+            item = dict(item or {})
+            account_id = item.get("account_id") or self._request_account_id(params)
+            order_sys_id = str(
+                item.get("order_sysid")
+                or item.get("order_sys_id")
+                or item.get("order_id")
+                or ""
+            )
+            market = str(item.get("market") or "")
+            # accepted/confirmed mirror the submit batch's vocabulary: the
+            # native cancel return answers "the request went out", not "the
+            # order is cancelled" -- and it lies in BOTH directions live
+            # (#148: false while the order was cancelled 67ms later; #151:
+            # true for an order that did not exist). The single-cancel path
+            # settles against the order snapshot; this batch path skips that
+            # (it is the latency the batch exists to avoid), so nothing here
+            # may claim "cancelled". The confirmation is the order-status push
+            # (54) or a query read-back.
+            entry = {"index": index, "success": False,
+                     "accepted": False, "confirmed": False}
+            if not order_sys_id:
+                entry["error"] = "order_sysid is required"
+                results.append(entry)
+                continue
+            order_ref = OrderRef(
+                order_sys_id=order_sys_id,
+                user_order_id=str(item.get("user_order_id") or ""),
+            )
+            try:
+                result = self.order_gateway.cancel(order_ref, account_id=account_id)
+                entry["success"] = bool(getattr(result, "success", result))
+                entry["accepted"] = True
+                entry["message"] = str(getattr(result, "message", "") or "")
+            except Exception as exc:
+                entry["error"] = "%s: %s" % (type(exc).__name__, exc)
+            results.append(entry)
+        return results
 
     def _settle_cancel_from_status(self, settlement, status, order_sys_id, final):
         """One status answer, from the watch table or the snapshot row."""
@@ -2761,6 +3360,12 @@ class BigQmtRpcHandlers:
 
     def _apply_cancel_lookup(self, settlement, final=False):
         """Resolve an ambiguous native cancel return from the order snapshot."""
+        from .account_type_map import request_account_type
+
+        with request_account_type(getattr(settlement, "account_type", None)):
+            return self._apply_cancel_lookup_as_requested(settlement, final=final)
+
+    def _apply_cancel_lookup_as_requested(self, settlement, final=False):
         settlement.attempts += 1
         order_sys_id = str(settlement.order_ref.order_sys_id or "")
         # Fast path: the order's own status change was pushed to us by QMT's
@@ -2833,6 +3438,41 @@ def _credit_optype_of(order_type):
         return credit_optype_of(order_type)
     except Exception:
         return None
+
+
+def _convertible_optype_of(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import convertible_optype_of
+
+        return convertible_optype_of(order_type)
+    except Exception:
+        return None
+
+
+def _is_cash_repay_order_type(order_type):
+    """直接还款 (MiniQMT 32 / 45): the amount rides in the volume slot."""
+    try:
+        return int(order_type) in (32, 45)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_sideless_order_type(order_type):
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import is_sideless_order_type
+
+        return is_sideless_order_type(order_type)
+    except Exception:
+        return False
+
+
+def _sideless_default_action():
+    try:
+        from bigqmt_signal_trader.adapters.order_bigqmt import SIDELESS_DEFAULT_ACTION
+
+        return SIDELESS_DEFAULT_ACTION
+    except Exception:
+        return "SELL"
 
 
 def _passthrough_optype_of(order_type):
@@ -2968,8 +3608,44 @@ class RedisPubSubRpcService:
         debug_log_limit=0,
         print_prefix="[bigqmt_rpc]",
         transport=None,
+        expire_margin_seconds=1.0,
+        settle_interval_seconds=0.25,
+        slow_request_seconds=1.0,
+        heavy_offload=True,
+        heavy_codes_threshold=HEAVY_READ_CODES_THRESHOLD,
     ):
         self.listen_redis = redis_client
+        # Heavy reads leave the adjust thread for one worker (#351). Only in
+        # the adjust drain: with background threads the receive thread already
+        # runs them off the strategy thread. See HEAVY_READ_METHODS.
+        self.heavy_offload = bool(heavy_offload)
+        self.heavy_codes_threshold = max(1, int(heavy_codes_threshold))
+        self._heavy_queue = queue.Queue()
+        # Replies the worker built. They are SENT from the adjust thread on
+        # its next tick, never from the worker: a zmq ROUTER socket and a
+        # named pipe handle are not shared between threads (the adjust thread
+        # is in recv on the same socket), and on redis a send from the worker
+        # would pay the same GIL tick the adjust send does.
+        self._heavy_replies = queue.Queue()
+        self._heavy_thread = None
+        self._heavy_count = 0
+        # A handler that holds its thread longer than this logs the method
+        # and the thread (#342). On the adjust thread that is the strategy
+        # frozen; the drain phase logs only its total, so a 33-minute
+        # ``[adjust_phase] drain`` never said which request it was inside.
+        self.slow_request_seconds = float(slow_request_seconds)
+        # A request past the client's own deadline is not dispatched (#303).
+        # The client states its wait in the envelope; the server measures the
+        # age from the moment it received the request, so no clock is shared.
+        # The margin covers the transport leg the server cannot see plus one
+        # passorder: refuse a little early rather than place an order whose
+        # caller has already gone.
+        self.expire_margin_seconds = max(0.0, float(expire_margin_seconds))
+        # How often drain_pending pauses a batch to settle and reply. With
+        # passorder at ~200ms, a 20-order batch is 4s in which nobody -- not
+        # even the first order, done at 0.2s -- gets an answer.
+        self.settle_interval_seconds = max(0.0, float(settle_interval_seconds))
+        self._expired_request_count = 0
         self.redis = response_redis_client or redis_client
         self.handlers = handlers
         self.account_id = str(account_id or "")
@@ -2988,6 +3664,10 @@ class RedisPubSubRpcService:
         self.debug_log_limit = int(debug_log_limit)
         self._received_count = 0
         self._processed_count = 0
+        # (account_id, request_id) -> {"at", "response"} for write methods,
+        # so a transparently retried RPUSH cannot dispatch a second order (#245).
+        self._order_requests = collections.OrderedDict()
+        self._duplicate_order_requests = 0
         self._published_count = 0
         self._deferred_count = 0
         self.print_prefix = print_prefix
@@ -2996,6 +3676,10 @@ class RedisPubSubRpcService:
         # Unbounded on purpose: every entry represents a live broker operation,
         # so dropping one would strand it with no reply.
         self._pending_settlements = queue.Queue()
+        # Async orders already answered, still watched for a pre-record
+        # refusal (#345). Separate from the reply queue so
+        # pending_settlement_count keeps meaning "replies waiting".
+        self._shadow_settlements = queue.Queue()
         self._running = threading.Event()
         self._thread = None
         self._queue_thread = None
@@ -3063,7 +3747,10 @@ class RedisPubSubRpcService:
         self._thread = getattr(self._transport, "_thread", None)
         self._queue_thread = getattr(self._transport, "_queue_thread", None)
         if not self.background_threads:
-            print("%s started queue=%s background_threads=False" % (self.print_prefix, self.request_queue))
+            self._start_heavy_worker()
+            print("%s started queue=%s background_threads=False heavy_offload=%s"
+                  % (self.print_prefix, self.request_queue,
+                     self._heavy_thread is not None))
             return
         print("%s started channel=%s queue=%s" % (self.print_prefix, self.request_channel, self.request_queue))
 
@@ -3073,10 +3760,115 @@ class RedisPubSubRpcService:
             self._transport.stop()
         except Exception:
             pass
+        heavy = self._heavy_thread
+        self._heavy_thread = None
+        if heavy is not None and heavy.is_alive():
+            heavy.join(1.0)
         # The transport owns the threads now; keep the attributes for back-compat.
         self._thread = None
         self._queue_thread = None
         self._pubsub = None
+
+    # -- heavy reads off the adjust thread (#351) -------------------------
+    def _start_heavy_worker(self):
+        if not self.heavy_offload or self._heavy_thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._heavy_loop, name="bigqmt-rpc-heavy", daemon=True)
+        thread.start()
+        self._heavy_thread = thread
+
+    def _heavy_loop(self):
+        while self._running.is_set():
+            try:
+                request = self._heavy_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.process_request(request)
+            except Exception:
+                print("%s heavy worker failed:\n%s" % (self.print_prefix, traceback.format_exc()))
+
+    def _on_heavy_worker(self):
+        thread = self._heavy_thread
+        return thread is not None and threading.current_thread() is thread
+
+    def _should_offload(self, payload):
+        """Heavy read, and there is a worker to take it."""
+        thread = self._heavy_thread
+        if thread is None or not thread.is_alive():
+            return False
+        method = str((payload or {}).get("method") or "")
+        return self.is_heavy_read(method, (payload or {}).get("params"))
+
+    def is_heavy_read(self, method, params=None):
+        canonical = self._canonical(method)
+        if canonical in LISTENER_DEFERRED_METHODS or canonical in ORDER_METHODS:
+            return False
+        if canonical in HEAVY_READ_METHODS:
+            return True
+        if canonical in HEAVY_READ_CODE_METHODS:
+            return self._heavy_by_size(canonical, params)
+        return False
+
+    def _heavy_by_size(self, canonical, params):
+        params = params if isinstance(params, dict) else {}
+        codes = params.get("stock_list")
+        if codes is None:
+            codes = params.get("codes")
+        if codes is None:
+            codes = params.get("stock_code", params.get("code"))
+        if isinstance(codes, str):
+            codes = [codes]
+        try:
+            codes = list(codes or [])
+        except TypeError:
+            codes = []
+        if len(codes) > self.heavy_codes_threshold:
+            return True
+        # A market token ("SH", "SZ", "SHO"...) is thousands of instruments.
+        for code in codes:
+            if isinstance(code, str) and code and "." not in code:
+                return True
+        if canonical == "get_ticks":
+            # types= only makes sense with a token; a caller who passes it
+            # wants the market.
+            return bool(params.get("types"))
+        period = str(params.get("period") or "").lower()
+        if period in ("tick", "l2quote", "l2order", "l2transaction"):
+            return True
+        # A date window (count -1 with a start) instead of the last N bars.
+        try:
+            count = int(params.get("count", -1))
+        except (TypeError, ValueError):
+            count = -1
+        if count < 0 and (params.get("start_time") or params.get("end_time")):
+            return True
+        return False
+
+    def heavy_queue_depth(self):
+        return self._heavy_queue.qsize()
+
+    def flush_heavy_replies(self, max_items=100):
+        """Send the worker's finished replies. Adjust thread."""
+        sent = 0
+        for _ in range(int(max_items)):
+            try:
+                request, response = self._heavy_replies.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._publish_response(request, response)
+            except Exception:
+                try:
+                    from .logging_setup import get_logger
+                    get_logger("rpc").error(
+                        "publish heavy reply failed method=%s:\n%s",
+                        (request or {}).get("method"), traceback.format_exc())
+                except Exception:
+                    pass
+            sent += 1
+        return sent
 
     def _listen_loop(self):
         while self._running.is_set():
@@ -3144,6 +3936,16 @@ class RedisPubSubRpcService:
 
     def enqueue_payload(self, raw_payload):
         payload = self._loads(raw_payload)
+        # Server clock, at receipt. The age the request reaches when the
+        # adjust thread finally picks it up is measured from here.
+        payload.setdefault("_received_at", time.time())
+        if self._should_offload(payload):
+            self._heavy_count += 1
+            if self._heavy_count <= self.debug_log_limit:
+                print("%s heavy read -> worker method=%s queued=%s"
+                      % (self.print_prefix, payload.get("method"), self._heavy_queue.qsize()))
+            self._heavy_queue.put(payload)
+            return
         if self._should_process_in_listener(payload):
             self.process_request(payload)
             return
@@ -3172,22 +3974,57 @@ class RedisPubSubRpcService:
         if not self.process_in_listener:
             return False
         method = str((payload or {}).get("method") or "")
+        canonical = getattr(self.handlers, "_canonical_method", lambda value: value)(method)
+        # Second gate, on the per-request path rather than the config path: a
+        # trade-context method never runs on the receive thread, whatever
+        # listener_methods happens to contain (#252). The expansion below is a
+        # one-off at construction; this runs for every request, so a spelling
+        # nobody thought of cannot route get_trade_detail_data off the main
+        # strategy thread -- where it answers with the right row count and
+        # every field None, which a client reads as "no money", not as a
+        # failed call.
+        if method in LISTENER_DEFERRED_METHODS or canonical in LISTENER_DEFERRED_METHODS:
+            return False
         if method in self.listener_methods:
             return True
-        canonical = getattr(self.handlers, "_canonical_method", lambda value: value)(method)
         return canonical in self.listener_methods
 
     def _expand_listener_methods(self, listener_methods):
+        """Which methods may run inline on the receive thread.
+
+        The deferred set is subtracted **last**, over the whole result, not
+        only inside the ``"*"`` branch. Naming a method explicitly used to
+        bypass the subtraction entirely, so
+        ``rpc_listener_methods=("get_asset",)`` put a trade-context method
+        back on the receive thread. That is harmless while the receive thread
+        IS the adjust thread (rpc_background_threads False), and silently
+        wrong the moment it is not: off the main strategy thread these answer
+        with the right row count and every field None -- which reads as "this
+        account has no money", not as a failed call.
+
+        Making it depend on two unrelated keys agreeing is what kept
+        ``rpc_background_threads`` pinned to False as a blanket rule. Enforce
+        it here instead: no configuration can route a trade-context method to
+        a background thread, so the flag is free to be chosen on latency.
+        """
+        resolve = getattr(self.handlers, "_canonical_method", lambda value: value)
         methods = set()
         for method in listener_methods or ():
             method = str(method)
             if method in ("*", "all", "read", "readonly"):
-                methods.update(READ_METHODS - LISTENER_DEFERRED_METHODS)
+                methods.update(READ_METHODS)
             else:
                 methods.add(method)
-                canonical = getattr(self.handlers, "_canonical_method", lambda value: value)(method)
-                methods.add(canonical)
-        return methods
+                methods.add(resolve(method))
+        # Subtract by CANONICAL name, not by the literal spelling. The loop
+        # above keeps the caller's alias alongside the canonical name, so a
+        # plain `methods - LISTENER_DEFERRED_METHODS` removed `get_positions`
+        # and left `query_stock_positions` sitting right next to it -- and
+        # `_should_process_in_listener` matches the raw method name first, so
+        # the alias won (#252). `("get_positions",)` and `("*",)` were correct
+        # throughout, which is what made this read as "the config spelling
+        # changes the answer" rather than as a dispatch bug.
+        return set(m for m in methods if resolve(m) not in LISTENER_DEFERRED_METHODS)
 
     def _loads(self, raw_payload):
         if isinstance(raw_payload, dict):
@@ -3208,12 +4045,38 @@ class RedisPubSubRpcService:
 
         Unsettled entries go back on the queue, so each order costs one lookup
         per adjust tick until it resolves or its deadline passes.
+
+        Timed like a request (#342's slow-request log): a pass that misses the
+        callback fast path scans the terminal's ORDER list, once per pass, and
+        drain_pending runs up to three passes per tick. With #345 every
+        order_stock_async is watched for order_settle_timeout_seconds too, so
+        on a day with hundreds of orders this is the one adjust-thread cost
+        that grew, and the log is where it shows.
         """
+        pending = self._pending_settlements.qsize()
+        shadow = self._shadow_settlements.qsize()
+        if not pending and not shadow:
+            return 0
+        _t0 = time.perf_counter()
+        try:
+            return self._settle_pending_orders(max_items)
+        finally:
+            self._note_slow_request(
+                "settle_pending_orders[pending=%d shadow=%d]" % (pending, shadow),
+                time.perf_counter() - _t0)
+
+    def _settle_pending_orders(self, max_items=100):
         settled = 0
         # Snapshot the size first. Unsettled entries go back on the same queue,
         # so draining until empty would keep re-picking them and spin one adjust
         # tick into many lookups per order.
         batch = min(int(max_items), self._pending_settlements.qsize())
+        # One ORDER snapshot per account per pass, fetched on the first
+        # settlement that misses the callback fast path and reused by the
+        # rest. It was one get_trade_detail_data per pending order per tick:
+        # a 20-order burst on a day with hundreds of rows cost 20 full
+        # conversions of the day's list every 100ms (#303).
+        orders_cache = {}
         for _ in range(batch):
             try:
                 settlement = self._pending_settlements.get_nowait()
@@ -3224,7 +4087,8 @@ class RedisPubSubRpcService:
                 if isinstance(settlement, CancelSettlement):
                     done = self.handlers._apply_cancel_lookup(settlement, final=expired)
                 else:
-                    done = self.handlers._apply_order_lookup(settlement, final=expired)
+                    done = self.handlers._apply_order_lookup(
+                        settlement, final=expired, orders_cache=orders_cache)
             except Exception:
                 done = True  # never strand a submitted order in the queue
             if not done:
@@ -3237,20 +4101,98 @@ class RedisPubSubRpcService:
                 response["server_error"] = settlement.server_error
             response["handled_at"] = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
+                request = settlement.request or {}
+                self._remember_order_response(
+                    (str(request.get("account_id") or self.account_id or ""),
+                     str(request.get("request_id") or "")),
+                    response, state="settled")
+            except Exception:
+                pass
+            try:
                 self._publish_response(settlement.request, response)
             except Exception:
                 pass
             settled += 1
+            if (getattr(settlement, "shadow", False)
+                    and not isinstance(settlement, CancelSettlement)):
+                # Converted at its deadline (#360): the reply answered
+                # "unconfirmed"; keep watching on the shadow queue so a late
+                # callback settles it silently and only a true refusal pushes
+                # order_error at the extended deadline.
+                self._shadow_settlements.put(settlement)
+        settled += self._settle_shadow_orders(orders_cache, max_items)
         return settled
+
+    def _settle_shadow_orders(self, orders_cache, max_items=100):
+        """Watch already-answered async orders; push order_error on a refusal (#345)."""
+        settled = 0
+        batch = min(int(max_items), self._shadow_settlements.qsize())
+        for _ in range(batch):
+            try:
+                settlement = self._shadow_settlements.get_nowait()
+            except queue.Empty:
+                break
+            expired = _monotonic() >= settlement.deadline
+            try:
+                done = self.handlers._apply_order_lookup(
+                    settlement, final=expired, orders_cache=orders_cache)
+            except Exception:
+                done = True
+            if not done:
+                self._shadow_settlements.put(settlement)
+                continue
+            if getattr(settlement, "server_error", ""):
+                self._push_shadow_order_error(settlement)
+            settled += 1
+        return settled
+
+    def shadow_settlement_count(self):
+        return self._shadow_settlements.qsize()
 
     def pending_settlement_count(self):
         return self._pending_settlements.qsize()
 
-    def drain_pending(self, max_items=20):
+    def _push_shadow_order_error(self, settlement):
+        """order_error for an async order the terminal never recorded (#345).
+
+        Same channels the 废单 callback path uses: the redis exec-event
+        channels when there is a redis client, else the quote push channel's
+        exec:* topic. A deployment with neither (pipe / mysql) cannot carry
+        it -- the client falls back to a synchronous settlement there.
+        """
+        request = settlement.order_request
+        publish = getattr(self.handlers, "publish_order_error", None)
+        if not callable(publish):
+            return
+        try:
+            publish(request, str(settlement.server_error or ""))
+        except Exception as exc:
+            print("%s shadow order_error push failed: %s" % (self.print_prefix, exc))
+
+    def drain_pending(self, max_items=20, budget_seconds=None):
+        """Run queued requests on the adjust thread, then settle.
+
+        ``budget_seconds`` bounds how long this tick keeps the strategy
+        thread (#303). Twenty orders at ~200ms each held it for 4s: QMT's
+        own callbacks could not land, so every settlement fell to the slow
+        query, and the first order's reply -- ready at 0.2s -- left with the
+        twentieth's. What does not fit stays queued for the next tick; at
+        least one request always runs. None keeps the old unbounded batch.
+        Every ``settle_interval_seconds`` of work the batch pauses to settle
+        and reply, so early orders answer while later ones still run.
+        """
+        # Replies the heavy worker finished since last tick go out first:
+        # they are already late by the read itself.
+        self.flush_heavy_replies()
         # Settle carry-overs from earlier ticks before taking on new work.
         self.settle_pending_orders()
         processed = 0
+        started = _monotonic()
+        last_settle = started
+        budget = None if budget_seconds is None else max(0.0, float(budget_seconds))
         for _ in range(int(max_items)):
+            if budget is not None and processed and _monotonic() - started >= budget:
+                break
             try:
                 request = self.pending.get_nowait()
             except queue.Empty:
@@ -3262,6 +4204,11 @@ class RedisPubSubRpcService:
                 )
             self.process_request(request)
             processed += 1
+            if (self.settle_interval_seconds
+                    and self._pending_settlements.qsize()
+                    and _monotonic() - last_settle >= self.settle_interval_seconds):
+                self.settle_pending_orders()
+                last_settle = _monotonic()
         # Settle again so an order submitted in THIS drain still replies on this
         # tick. One lookup, no sleep -- if QMT has not assigned the id yet we
         # simply retry next tick rather than holding the thread (issue #44).
@@ -3284,11 +4231,166 @@ class RedisPubSubRpcService:
             processed += 1
         return processed
 
+    ORDER_DEDUP_MAX = 512
+    ORDER_DEDUP_TTL_SECONDS = 600
+
+    def _canonical(self, method):
+        resolve = getattr(self.handlers, "_canonical_method", None)
+        return resolve(method) if callable(resolve) else method
+
+    def _claim_order_request(self, key):
+        """Claim (account_id, request_id) for a write. None == first time.
+
+        Returns the existing entry when this id has already been seen, so the
+        caller can answer without dispatching a second native order.
+        """
+        store = getattr(self, "_order_requests", None)
+        if store is None:
+            store = self._order_requests = collections.OrderedDict()
+        now = time.time()
+        # Prune by age, then by size. Both are bounded on purpose: this runs
+        # on the adjust thread and must not grow with uptime.
+        for stale in [k for k, v in store.items()
+                      if now - v.get("at", now) > self.ORDER_DEDUP_TTL_SECONDS]:
+            store.pop(stale, None)
+        while len(store) > self.ORDER_DEDUP_MAX:
+            store.popitem(last=False)
+        existing = store.get(key)
+        if existing is not None:
+            return existing
+        store[key] = {"at": now, "response": None, "state": "dispatching"}
+        return None
+
+    def _remember_order_response(self, key, response, state=None):
+        store = getattr(self, "_order_requests", None)
+        if store is not None and key in store:
+            store[key]["response"] = response
+            if state:
+                store[key]["state"] = state
+
+    # Cancels run however late they arrive: a late cancel is harmless and is
+    # exactly what a caller who gave up on it still wants. A late submit is
+    # the opposite -- the caller has already decided it did not happen.
+    _EXPIRY_EXEMPT_METHODS = frozenset(["cancel_order", "cancel_orders_batch"])
+
+    def _client_deadline(self, request):
+        """When this request's caller stops listening, on the server clock.
+
+        None when the envelope does not say (a client older than #303) --
+        such a request is never refused, exactly as before.
+        """
+        try:
+            timeout = float(request.get("timeout_seconds") or 0)
+            received_at = float(request.get("_received_at") or 0)
+        except (TypeError, ValueError):
+            return None
+        if timeout <= 0 or received_at <= 0:
+            return None
+        margin = min(self.expire_margin_seconds, timeout * 0.25)
+        return received_at + timeout - margin
+
+    def _expired_before_dispatch(self, request, method):
+        if self._canonical(method) in self._EXPIRY_EXEMPT_METHODS:
+            return None
+        deadline = self._client_deadline(request)
+        if deadline is None:
+            return None
+        now = time.time()
+        if now < deadline:
+            return None
+        return now - float(request.get("_received_at") or now)
+
+    def _refuse_expired(self, request, response, method, waited, order_key):
+        """Reply RequestExpired without dispatching (#303).
+
+        Orders run one at a time on the QMT strategy thread, ~200ms each.
+        Thirty-two concurrent order_stock calls with a 6s timeout: the first
+        twenty fill the first drain, the rest wait for the next tick, time
+        out at 6s -- and were then placed anyway, minutes after the caller
+        had logged them as failed. The caller's timeout must mean what it
+        says: after it, nothing it asked for happens.
+        """
+        self._expired_request_count += 1
+        response["error"] = (
+            "RequestExpired: queued %.1fs on the server, past the client's "
+            "%.1fs timeout; NOT dispatched (no order was placed). Orders run "
+            "serially on the QMT strategy thread -- lower the concurrency "
+            "or raise timeout_seconds." % (waited, float(request.get("timeout_seconds") or 0)))
+        response["_t_reply"] = time.time()
+        if order_key is not None:
+            self._remember_order_response(order_key, response, state="refused")
+        if self._expired_request_count <= 5 or self._expired_request_count % 100 == 0:
+            print("%s refused expired request method=%s request_id=%s waited=%.1fs (total %d)"
+                  % (self.print_prefix, method, response.get("request_id"), waited,
+                     self._expired_request_count))
+        try:
+            self._publish_response(request, response)
+        except Exception:
+            pass
+        return response
+
+    def _request_outcome(self, params, account_id=None):
+        """What became of an order request, by request_id (#303).
+
+        For a caller whose order_stock timed out. Read on the listener thread,
+        so it answers even while the adjust thread is deep in a batch.
+
+            unknown      never picked up (still queued -- it will be refused
+                         when it is, being past its deadline -- or dropped)
+            dispatching  passorder is running right now
+            dispatched   passorder returned; the order id is being looked up
+            settled      replied; ``response`` is what the caller missed
+            refused      past its deadline before dispatch; nothing placed
+        """
+        request_id = str((params or {}).get("request_id") or "").strip()
+        if not request_id:
+            raise ValueError("request_id is required")
+        account_id = str(account_id or (params or {}).get("account_id") or self.account_id or "")
+        store = getattr(self, "_order_requests", None) or {}
+        entry = store.get((account_id, request_id))
+        if entry is None:
+            return {"request_id": request_id, "state": "unknown", "response": None}
+        return {"request_id": request_id, "state": entry.get("state") or "dispatching",
+                "response": entry.get("response")}
+
     def process_request(self, request):
         request = dict(request or {})
         request_id = str(request.get("request_id") or request.get("id") or uuid.uuid4().hex)
         account_id = str(request.get("account_id") or self.account_id or "")
         method = str(request.get("method") or "")
+
+        # At-most-once for writes (#245). The client's redis-py connection
+        # retries transparently on ConnectionError/TimeoutError, and the retry
+        # re-sends the whole command -- conn.retry wraps send AND parse, so an
+        # RPUSH the server already accepted is sent again when the reply is
+        # lost. Nothing downstream deduped: order_stock / order_stock_async
+        # both alias to submit_order, and _handle_submit_order has no
+        # idempotency check (only submit_orders_batch does). So one
+        # client.call could dispatch two native passorders.
+        #
+        # The retry re-sends the identical payload, request_id included, which
+        # is what makes this fixable here: the second copy is recognisable.
+        # Answer it with the first one's response instead of dispatching --
+        # both copies name the same reply key, so it lands where the client is
+        # already waiting.
+        order_key = None
+        if request_id and self._canonical(method) in ORDER_METHODS:
+            order_key = (account_id, request_id)
+            seen = self._claim_order_request(order_key)
+            if seen is not None:
+                self._duplicate_order_requests += 1
+                remembered = seen.get("response")
+                print("%s duplicate order request suppressed method=%s request_id=%s"
+                      % (self.print_prefix, method, request_id))
+                if remembered is None:
+                    # Still in flight: the first copy publishes to the same
+                    # reply key when it settles. Nothing to do but not dispatch.
+                    return None
+                try:
+                    self._publish_response(request, remembered)
+                except Exception:
+                    pass
+                return remembered
         response = {
             "schema_version": 1,
             "request_id": request_id,
@@ -3309,12 +4411,21 @@ class RedisPubSubRpcService:
             # return without guessing (#104).
             "_t_recv": time.time(),
         }
+        waited = self._expired_before_dispatch(request, method)
+        if waited is not None:
+            return self._refuse_expired(request, response, method, waited, order_key)
         try:
             if self.account_id and account_id and account_id != self.account_id:
                 raise PermissionError("account_id mismatch")
-            _t0 = time.perf_counter() if method == "ping" else 0.0
-            result = self.handlers.handle(method, request.get("params") or {})
-            _t1 = time.perf_counter() if method == "ping" else 0.0
+            _t0 = time.perf_counter()
+            try:
+                if method == "get_request_outcome":
+                    result = self._request_outcome(request.get("params") or {}, account_id)
+                else:
+                    result = self.handlers.handle(method, request.get("params") or {})
+            finally:
+                _t1 = time.perf_counter()
+                self._note_slow_request(method, _t1 - _t0)
             response["data"] = to_jsonable(result)
             response["ok"] = True
             # Surface server-side diagnostics when the handler recorded one.
@@ -3325,6 +4436,10 @@ class RedisPubSubRpcService:
             # a falsey native cancel may still be awaiting a reliable terminal
             # status (#148). Park either reply instead of sleeping on this
             # thread; a later adjust tick settles and publishes it (#44).
+            take_shadows = getattr(self.handlers, "take_shadow_settlements", None)
+            for shadow in (take_shadows() if callable(take_shadows) else []):
+                shadow.request = request
+                self._shadow_settlements.put(shadow)
             take = getattr(self.handlers, "take_pending_settlement", None)
             settlement = take() if callable(take) else None
             if settlement is not None:
@@ -3332,10 +4447,14 @@ class RedisPubSubRpcService:
                 settlement.response = response
                 self._pending_settlements.put(settlement)
                 self._deferred_count += 1
+                if order_key is not None:
+                    self._remember_order_response(order_key, response, state="dispatched")
                 return response
         except Exception as exc:
             response["error"] = "%s: %s" % (exc.__class__.__name__, exc)
         response["_t_reply"] = time.time()
+        if order_key is not None:
+            self._remember_order_response(order_key, response, state="settled")
         _t_pub0 = time.perf_counter() if method == "ping" else 0.0
         try:
             self._publish_response(request, response)
@@ -3370,12 +4489,44 @@ class RedisPubSubRpcService:
             print("%s responded method=%s ok=%s" % (self.print_prefix, method, response["ok"]))
         return response
 
+    def _note_slow_request(self, method, seconds):
+        """Name a handler that held its thread for ``slow_request_seconds``.
+
+        Logged after the handler returns (or raises), so it cannot add GIL
+        wait to a request that was fast. Never raises: this runs on the
+        adjust thread too, where an exception stops the strategy.
+        """
+        try:
+            threshold = float(self.slow_request_seconds)
+        except Exception:
+            threshold = 1.0
+        if threshold <= 0 or seconds < threshold:
+            return
+        try:
+            thread_name = threading.current_thread().name
+        except Exception:
+            thread_name = "?"
+        try:
+            from .logging_setup import get_logger
+            get_logger("rpc").warning(
+                "slow request method=%s took %.1fs thread=%s (#342: this is "
+                "what an [adjust_phase] drain of the same size was inside)",
+                method, seconds, thread_name)
+        except Exception:
+            pass
+
     def _format_response_target(self, template, account_id, request_id):
         if not template:
             return ""
         return template.format(account_id=account_id, request_id=request_id)
 
     def _publish_response(self, request, response):
+        if self._on_heavy_worker():
+            # Built on the worker, sent by the adjust thread (see
+            # _heavy_replies). Every publish the worker reaches -- the normal
+            # reply, a RequestExpired refusal -- parks here.
+            self._heavy_replies.put((request, response))
+            return
         # Delegate to the transport (RedisTransport fans out to key/list/channel;
         # ZMQ/MySQL transports use their native reply path).
         self._transport.send_response(request, response)
@@ -3452,10 +4603,11 @@ def call_redis_rpc(
     timeout_seconds=3.0,
     ttl_seconds=60,
     transport="queue",
+    request_id=None,
 ):
     """Small external client helper for tests and admin scripts."""
 
-    request_id = uuid.uuid4().hex
+    request_id = str(request_id or uuid.uuid4().hex)
     request_channel = request_channel_template.format(account_id=account_id)
     request_queue = request_queue_template.format(account_id=account_id)
     response_channel = response_channel_template.format(account_id=account_id, request_id=request_id)
@@ -3471,6 +4623,9 @@ def call_redis_rpc(
         "reply_list": response_list,
         "reply_key": response_key,
         "ttl_seconds": ttl_seconds,
+        # How long this caller waits. The server refuses, rather than runs,
+        # an order it only gets to after that (#303).
+        "timeout_seconds": float(timeout_seconds),
     }
     payload = encode_rpc_request_payload(request)
     if str(transport or "queue").lower() in ("queue", "list", "blpop"):

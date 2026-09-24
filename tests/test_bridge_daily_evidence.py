@@ -33,7 +33,8 @@ def _stub_support(monkeypatch, ping, fresh=True, orders_enabled=False):
     monkeypatch.setattr(recorder, "snapshot_freshness", lambda *_args, **_kwargs: {
         "status": "PASS" if fresh else "DEGRADED", "fresh": fresh, "detail": "stub"})
     monkeypatch.setattr(recorder, "order_lock_state", lambda *_args, **_kwargs: {
-        "mode": "live", "orders_enabled": orders_enabled, "execution_consumer_enabled": orders_enabled})
+        "mode": "READ_ONLY_LOCKED" if not orders_enabled else "live",
+        "orders_enabled": orders_enabled, "execution_consumer_enabled": orders_enabled})
 
 
 def test_build_sample_passes_when_strategy_is_running_and_locked(monkeypatch):
@@ -87,6 +88,19 @@ def test_build_sample_marks_open_order_lock_as_failure(monkeypatch):
     sample = recorder.build_sample("simulation", _config(), 3.0)
     assert sample["checks"]["order_lock"] == "FAIL"
     assert sample["status"] == "DEGRADED"
+
+
+def test_build_sample_accepts_persistent_local_simulation_execution(monkeypatch):
+    _stub_support(monkeypatch, _reply(), orders_enabled=True)
+    monkeypatch.setattr(recorder, "order_lock_state", lambda *_args, **_kwargs: {
+        "mode": "SIMULATION_STRATEGY_EXECUTION_ENABLED",
+        "orders_enabled": True,
+        "execution_consumer_enabled": True,
+    })
+    sample = recorder.build_sample("simulation", _config(), 3.0)
+    assert sample["checks"]["order_lock"] == "PASS"
+    assert sample["orders_enabled"] is True
+    assert sample["read_only"] is False
 
 
 def test_write_sample_merges_same_day_and_caps_samples(tmp_path: Path, monkeypatch):

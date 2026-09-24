@@ -29,7 +29,7 @@ from kitling_bigqmt.readonly_rpc import ReadOnlyBigQmtClient, encode_rpc_request
 from kitling_bigqmt.runtime_control import RuntimeControl  # noqa: E402
 from kitling_bigqmt.machine_config import load_gateway  # noqa: E402
 from kitling_bigqmt.simulation_cycle import (  # noqa: E402
-    ACCOUNT_ID, STRATEGY_ID, SimulationExecutionBlocked, build_cycle_plan,
+    STRATEGY_ID, SimulationExecutionBlocked, build_cycle_plan, live_broker_orders,
 )
 from kitling_bigqmt.sleeve_accounting import SleeveAccounting  # noqa: E402
 from kitling_bigqmt.state_store import RuntimeStateStore  # noqa: E402
@@ -38,18 +38,18 @@ from kitling_bigqmt.state_store import RuntimeStateStore  # noqa: E402
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
-def _rpc_submit(redis: RedisRespClient, params: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _rpc_submit(redis: RedisRespClient, params: dict[str, Any], timeout: float, account_id: str) -> dict[str, Any]:
     request_id = uuid.uuid4().hex
-    response_key = "bigqmt:rpc:resp:%s:%s" % (ACCOUNT_ID, request_id)
+    response_key = "bigqmt:rpc:resp:%s:%s" % (account_id, request_id)
     request = {
-        "schema_version": 1, "request_id": request_id, "account_id": ACCOUNT_ID,
+        "schema_version": 1, "request_id": request_id, "account_id": account_id,
         "method": "submit_order", "params": params, "reply_channel": response_key,
-        "reply_list": "bigqmt:rpc:respq:%s:%s" % (ACCOUNT_ID, request_id),
+        "reply_list": "bigqmt:rpc:respq:%s:%s" % (account_id, request_id),
         "reply_key": response_key, "ttl_seconds": 60,
     }
-    redis.command("RPUSH", "bigqmt:rpc:queue:%s" % ACCOUNT_ID,
+    redis.command("RPUSH", "bigqmt:rpc:queue:%s" % account_id,
                   encode_rpc_request_payload(request))
-    redis.command("EXPIRE", "bigqmt:rpc:queue:%s" % ACCOUNT_ID, 60)
+    redis.command("EXPIRE", "bigqmt:rpc:queue:%s" % account_id, 60)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         raw = redis.command("GET", response_key)
@@ -94,15 +94,16 @@ def main() -> int:
     if preflight_only_gate:
         execute = False
     config = load_gateway(ROOT, "simulation")
-    if config.get("environment") != "simulation" or str(config.get("account_id")) != ACCOUNT_ID:
-        raise SystemExit("blocked: simulation account binding mismatch")
+    account_id = str(config.get("account_id") or "").strip()
+    if config.get("environment") != "simulation" or not account_id:
+        raise SystemExit("blocked: simulation account is not configured")
     registry = json.loads((ROOT / "config" / "strategy_registry.json").read_text(encoding="utf-8"))
     registered = next((item for item in registry.get("strategies", []) if item.get("strategy_id") == STRATEGY_ID), None)
     if not registered or registered.get("execution_enabled") is not True:
         raise SystemExit("blocked: v1.1.15 simulation execution is not enabled in the registry")
 
     redis = RedisRespClient(**dict(config["redis"]))
-    client = ReadOnlyBigQmtClient(redis, ACCOUNT_ID, float(config.get("rpc_timeout_seconds", 12)))
+    client = ReadOnlyBigQmtClient(redis, account_id, float(config.get("rpc_timeout_seconds", 12)))
     store = RuntimeStateStore(Path(config["state_db"]), Path(config["audit_dir"]))
     accounting = SleeveAccounting(store)
     attributable_trades_reply = client.trades()
@@ -113,7 +114,7 @@ def main() -> int:
                   if item.get("strategy_id") == STRATEGY_ID), None)
     report: dict[str, Any] = {
         "schema_version": 1, "kind": "v1_1_15_tray_simulation_cycle", "created_at": now.isoformat(),
-        "account_id": ACCOUNT_ID, "strategy_id": STRATEGY_ID,
+        "account_id": account_id, "strategy_id": STRATEGY_ID,
         "execute_requested": bool(args.execute), "execute_effective": bool(execute),
         "preflight_only_date_gate": bool(preflight_only_gate),
         "broker_call_made": False, "orders_enabled_after": False,
@@ -135,18 +136,23 @@ def main() -> int:
         sleeve = accounting.summary(STRATEGY_ID, prices)
         calendar_reply = client.trading_dates("SH", "20260101", now.strftime("%Y%m%d"), -1)
         trading_days = list(calendar_reply.get("data") or [])
-        baseline = json.loads((ROOT / "runtime_data" / "baselines" / "simulation_90000001_external_positions.json").read_text(encoding="utf-8"))
+        baseline = json.loads((ROOT / "runtime_data" / "baselines" / ("simulation_%s_external_positions.json" % account_id)).read_text(encoding="utf-8"))
         broker_positions = dict(positions_reply.get("data") or {})
         broker_quantities = {code: int((row or {}).get("volume") or 0) for code, row in broker_positions.items()}
         reconciliation = reconcile_daily_positions(broker_quantities, dict(baseline.get("positions") or {}), owned)
+        broker_orders = list(orders_reply.get("data") or [])
+        live_orders = live_broker_orders(broker_orders)
         report.update({"signal_event": event, "bridge": ping.get("data"), "account": asset.get("data"),
-                       "broker_open_order_count": len(orders_reply.get("data") or []), "sleeve": sleeve,
+                       "broker_order_count": len(broker_orders),
+                       "broker_open_order_count": len(live_orders),
+                       "broker_live_orders": live_orders,
+                       "sleeve": sleeve,
                        "reconciliation": reconciliation, "trading_calendar_days": trading_days,
                        "fill_reconciliation": fill_reconciliation})
         plan = build_cycle_plan(
             now=now, signal_event=event,
             activation_signal_not_before=str(registered["activation_policy"]["activation_signal_not_before"]),
-            sleeve_summary=sleeve, ticks=dict(ticks_reply.get("data") or {}), account_id=ACCOUNT_ID,
+            sleeve_summary=sleeve, ticks=dict(ticks_reply.get("data") or {}), account_id=account_id,
             open_orders=list(orders_reply.get("data") or []), reconciliation_status=str(reconciliation.get("status")),
             attributable_fills=accounting.fill_records(STRATEGY_ID), trading_days=trading_days,
         )
@@ -169,7 +175,7 @@ def main() -> int:
         if not bool((ping.get("data") or {}).get("allow_order_methods")):
             raise SimulationExecutionBlocked("QMT Bridge execution route is not loaded")
         claim = store.claim_strategy_execution_attempt({
-            "signal_id": plan["signal_id"], "strategy_id": STRATEGY_ID, "account_id": ACCOUNT_ID,
+            "signal_id": plan["signal_id"], "strategy_id": STRATEGY_ID, "account_id": account_id,
             "signal_day": str(event["signal_day"]), "stock_code": plan["stock_code"],
             "side": plan["side"], "quantity": int(plan["quantity"]),
         })
@@ -182,19 +188,22 @@ def main() -> int:
         control = RuntimeControl(ROOT / "runtime_data" / "control" / "simulation" / "runtime_control.json")
         response: dict[str, Any] | None = None
         try:
-            control.arm_simulation_strategy(account_id=ACCOUNT_ID, strategy_id=STRATEGY_ID,
-                                            approval_scope="Tray-owned v1.1.15 simulation cycle", valid_for_seconds=120)
-            # Single fail-closed order gate: formal accounts, a missing or
-            # expired local window, and a Coordinator that does not designate
-            # this host all deny before any RPC write happens.
+            control.enable_simulation_strategy(
+                account_id=account_id,
+                strategy_id=STRATEGY_ID,
+                approval_scope="Tray-owned v1.1.15 simulation cycle",
+            )
+            # Single fail-closed local order gate: formal accounts, a missing
+            # local authorization Key, a locked runtime, and failed preflight
+            # deny before any RPC write. Coordinator is monitor-only.
             report["execution_admission"] = require_admission_for_root(
                 ROOT, "simulation", strategy_id=STRATEGY_ID, authorization=control.status(),
             )
             response = _rpc_submit(redis, {
-                "account_id": ACCOUNT_ID, "action": plan["side"], "stock_code": plan["stock_code"],
+                "account_id": account_id, "action": plan["side"], "stock_code": plan["stock_code"],
                 "volume": int(plan["quantity"]), "price": float(plan["limit_price"]), "price_type": "LIMIT",
                 "strategy_name": STRATEGY_ID, "signal_id": plan["signal_id"], "remark": plan["signal_id"],
-            }, float(config.get("rpc_timeout_seconds", 12)))
+            }, float(config.get("rpc_timeout_seconds", 12)), account_id)
             report["broker_call_made"] = True
             report["response"] = response
             final_state = "SUBMITTED" if response.get("ok") else (
@@ -203,20 +212,32 @@ def main() -> int:
             if final_state == "SUBMITTED":
                 reply = dict(response.get("data") or {})
                 report["order_attribution"] = store.register_strategy_order_attribution({
-                    "strategy_id": STRATEGY_ID, "account_id": ACCOUNT_ID,
+                    "strategy_id": STRATEGY_ID, "account_id": account_id,
                     "user_order_id": reply.get("user_order_id"), "order_sys_id": reply.get("order_sys_id"),
                     "stock_code": plan["stock_code"], "side": plan["side"], "quantity": int(plan["quantity"]),
                     "source_evidence": "strategy_execution_cycle:" + str(plan["signal_id"]),
                 })
             report["attempt_finalization"] = store.finish_strategy_execution_attempt(plan["signal_id"], final_state, response)
             report["status"] = final_state
-        finally:
-            control.lock_orders("v1.1.15 Tray cycle finished; reconcile broker facts before another order")
+        report["orders_enabled_after"] = control.status().get("orders_enabled", False)
         path = _write_evidence(report)
         print(json.dumps({"status": report["status"], "plan": plan, "response": response,
-                          "evidence": str(path), "broker_call_made": True, "orders_enabled": False}, ensure_ascii=False, indent=2))
+                          "evidence": str(path), "broker_call_made": True,
+                          "orders_enabled": control.status().get("orders_enabled", False)}, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "SUBMITTED" else 2
     except Exception as exc:
+        # A local admission/configuration failure happens before any broker
+        # RPC.  Finalize the durable claim as rejected so a corrected gate can
+        # retry the same deterministic signal without leaving SUBMITTING
+        # forever.  Unknown broker responses are never finalized here.
+        claim = report.get("execution_claim") or {}
+        if claim.get("result") == "CLAIMED" and not report.get("broker_call_made"):
+            try:
+                report["attempt_finalization"] = store.finish_strategy_execution_attempt(
+                    str(claim.get("signal_id") or ""), "REJECTED", {"error": str(exc), "broker_call_made": False}
+                )
+            except Exception as finalize_exc:
+                report["attempt_finalization_error"] = "%s: %s" % (type(finalize_exc).__name__, finalize_exc)
         report.update({"status": "BLOCKED", "error_type": type(exc).__name__, "error": str(exc)})
         path = _write_evidence(report)
         print(json.dumps({"status": "BLOCKED", "error": str(exc), "evidence": str(path),

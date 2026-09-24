@@ -26,6 +26,7 @@ The split matters. Per the official docs and the ContextInfo IDE stub
 This module does not make trading decisions.
 """
 
+import datetime as _dt
 import importlib
 import time
 
@@ -36,6 +37,12 @@ from ..quote_utils import find_code_payload, is_option_code, latest_quote_row
 
 
 log = get_logger("market")
+
+
+def _ignore_tick_push(data):
+    """Callback for the #310 warm-up subscriptions: the snapshot is read back
+    with get_full_tick, so the pushes themselves are not needed."""
+    return None
 
 
 MARKET_CODES = {"SH", "SZ", "BJ", "HK"}
@@ -69,6 +76,10 @@ SECTOR_BY_TYPE = {
     "etf": "沪深ETF",
     "index": "沪深指数",
     "convertible": "沪深转债",
+    # Aliases for the same sector: what people actually type.
+    "cbond": "沪深转债",
+    "cb": "沪深转债",
+    "convertible_bond": "沪深转债",
 }
 
 
@@ -101,6 +112,25 @@ def _float_or_none(value):
     except (TypeError, ValueError):
         return None
     return number
+
+
+def _int_or_default(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_flag(value):
+    """A request flag as a bool, with JSON's spellings of false honoured.
+
+    ``bool("false")`` is True, which is how a diagnostic switch turns itself
+    permanently on. Params arrive over RPC as JSON, so a caller writing
+    ``"false"`` or ``"0"`` has to mean it.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "none")
+    return bool(value)
 
 
 def _row_day(row):
@@ -166,19 +196,53 @@ def _raw_frame_columns(field_list):
     return columns
 
 
+def _records_have_rows(records):
+    """True when ``records`` carries at least one bar.
+
+    ``get_market_data_ex_ori`` answers two empty shapes:
+
+    * a list of rows (``[]``)
+    * a dict of column arrays whose every array has length 0
+
+    The column-dict is truthy in Python. On Guojin 2.0.8.0 that is the
+    empty answer for 1mon+ (12 keys, all length 0, measured 2026-09-11).
+    ``if records:`` treated it as data, so #237's rescue never ran: the
+    primary was kept, ``synth_fallback_only=True`` (which skips it) still
+    answered 10 rows from ``ContextInfo.get_market_data``.
+    """
+    if records is None:
+        return False
+    if isinstance(records, dict):
+        if records.get("__bigqmt_type__") == "DataFrame":
+            return _records_have_rows(records.get("records"))
+        for column in records.values():
+            try:
+                if len(column) > 0:
+                    return True
+            except TypeError:
+                if column not in (None, ""):
+                    return True
+        return False
+    try:
+        return len(records) > 0
+    except TypeError:
+        return bool(records)
+
+
 def _market_data_answer_empty(answer):
     """True when no code in the answer carries a single row.
 
     Covers both shapes get_market_data_ex can return: the raw path's
-    serialisable marker dict (records list) and the plain path's pandas
-    frames (index length). Anything unrecognised counts as an answer rather
-    than as empty -- a retry must never replace data with nothing.
+    serialisable marker dict (records list *or* a dict of column arrays)
+    and the plain path's pandas frames (index length). Anything
+    unrecognised counts as an answer rather than as empty -- a retry must
+    never replace data with nothing.
     """
     if not isinstance(answer, dict) or not answer:
         return True
     for value in answer.values():
         if isinstance(value, dict) and value.get("__bigqmt_type__") == "DataFrame":
-            if value.get("records"):
+            if _records_have_rows(value.get("records")):
                 return False
         elif hasattr(value, "index"):
             try:
@@ -186,36 +250,21 @@ def _market_data_answer_empty(answer):
                     return False
             except Exception:
                 return False
-        elif value:
+        elif _records_have_rows(value):
             return False
     return True
 
 
-def _factor_answer_has_rows(answer):
-    """Return whether a dividend-factor answer carries at least one row.
+def _raw_market_data_payload(payload, field_list, stock_list, partial=None):
+    """Serialisable ``{code: DataFrame envelope}``.
 
-    Big QMT builds differ: one returns a dict keyed by epoch, another returns
-    a pandas DataFrame.  ``if answer`` is unsafe for DataFrame because pandas
-    deliberately raises an ambiguous-truth-value error.  Keep this helper
-    shape-agnostic so range factor requests can prefer a real answer without
-    accidentally falling through to the expensive expansion path.
+    ``partial`` rides along as an extra envelope key when the answer is not
+    the one that was asked for -- fewer columns, a dropped argument, a
+    different servant. An older client simply ignores the key (skew-safe);
+    this repo's client turns it into ``DataFrame.attrs["bigqmt_partial"]`` and
+    warns, so a caller learns their answer is degraded without having to read
+    the terminal's log.
     """
-    if answer is None:
-        return False
-    if hasattr(answer, "empty"):
-        try:
-            return not bool(answer.empty)
-        except Exception:
-            pass
-    if isinstance(answer, dict):
-        return bool(answer)
-    try:
-        return len(answer) > 0
-    except Exception:
-        return True
-
-
-def _raw_market_data_payload(payload, field_list, stock_list):
     if not isinstance(payload, dict):
         return payload
     source = {str(code): records for code, records in payload.items()}
@@ -225,14 +274,182 @@ def _raw_market_data_payload(payload, field_list, stock_list):
         if text not in codes:
             codes.append(text)
     columns = _raw_frame_columns(field_list)
-    return {
-        code: {
+    frames = {}
+    for code in codes:
+        frame = {
             "__bigqmt_type__": "DataFrame",
             "columns": columns,
             "records": source.get(code) or [],
         }
-        for code in codes
-    }
+        if partial:
+            frame["__bigqmt_partial__"] = dict(partial)
+        frames[code] = frame
+    return frames
+
+
+# The fields the rescue's servant actually serves.
+#
+# Name the servant right, because it is NOT get_local_data. The terminal's own
+# wrapper is
+#     get_local_data(stock_code='', start_time='19700101', end_time='22010101',
+#                    period='follow', divid_type='none', count=-1)
+# -- no field list at all, and ``divid_type`` rather than ``dividend_type`` --
+# so every shape ``_market_data_shapes("get_local_data", ...)`` builds raises
+# TypeError, and the call lands on the ``get_market_data`` shapes appended
+# after them:
+#     ContextInfo.get_market_data(fields, stock_code=[], start_time='',
+#                                 end_time='', skip_paused=True,
+#                                 period='follow', dividend_type='follow',
+#                                 count=-1)
+# That is what answers on a Guojin terminal, that is what the field behaviour
+# below was measured on, and that is what the operator warning names.
+#
+# Measured by asking for one field at a time (600519.SH, 1mon, count=10):
+# open/high/low/close/volume/amount/settle answer 10 rows; time,
+# settelementPrice, openInterest, preClose, suspendFlag and stime answer ZERO
+# -- and one unserved name in the list zeroes the WHOLE request (the 11-column
+# list returns 0 rows, an empty field_list returns 0 rows). That follows from
+# the wrapper's own body, which does ``oriData[code][timenode][field]`` for
+# every requested name.
+#
+# ``settle`` is deliberately left out even though it answered: it is the one
+# name whose spelling differs between builds (settle vs settelementPrice), so
+# including it risks zeroing the rescue on the very terminals that need it.
+# The six below are exactly what the #237 reporter measured working on the
+# broken build.
+_SYNTH_RESCUE_SERVED_FIELDS = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _single_code_frame(answer, code):
+    """The one code's bar frame out of whatever ContextInfo answered.
+
+    Asked for ONE code with a count or a time range, the terminal's
+    ``get_market_data`` returns a **bare** ``pandas.DataFrame`` (index = bar
+    labels, columns = fields) -- not ``{code: frame}``. Asked for several it
+    returns a ``pandas.Panel`` (QMT ships pandas 0.22). The rescue asks one
+    code at a time precisely so it lands on the first, predictable branch;
+    the other shapes are handled defensively, not relied on.
+
+    Returns None when the answer carries nothing for this code.
+    """
+    if answer is None:
+        return None
+    if isinstance(answer, dict):
+        if answer.get("__bigqmt_type__") == "DataFrame":
+            return answer
+        text = str(code)
+        for key, value in answer.items():
+            if str(key) == text:
+                return value
+        if len(answer) == 1:
+            return list(answer.values())[0]
+        return None
+    if hasattr(answer, "columns") and hasattr(answer, "index"):
+        return answer                      # the single-code DataFrame branch
+    try:
+        return answer[code]                # pandas Panel: item axis is the code
+    except Exception:
+        return None
+
+
+def _frame_axis_rows(frame):
+    """``[(axis label, row dict), ...]`` for a market-data frame.
+
+    ``_frame_rows`` above is not enough here: the rescue's frame carries the
+    bar date on the frame's *index*, not in a column, and ``_frame_rows``
+    reads a pandas frame positionally (``frame[name][i]``), which is label
+    lookup on a date-indexed frame and raises. So walk the index explicitly.
+    """
+    if frame is None:
+        return []
+    if isinstance(frame, dict) and frame.get("__bigqmt_type__") == "DataFrame":
+        columns = [str(name) for name in (frame.get("columns") or [])]
+        out = []
+        for record in frame.get("records") or []:
+            if isinstance(record, dict):
+                row = dict(record)
+            elif isinstance(record, (list, tuple)) and columns:
+                row = dict(zip(columns, record))
+            else:
+                continue
+            out.append((row.get("stime"), row))
+        return out
+    if hasattr(frame, "columns") and hasattr(frame, "index"):
+        try:
+            columns = [name for name in frame.columns]
+            labels = list(frame.index)
+            series = dict((name, list(frame[name])) for name in columns)
+            return [
+                (labels[i], dict((str(name), series[name][i]) for name in columns))
+                for i in range(len(labels))
+            ]
+        except Exception:
+            return []
+    return [(row.get("stime") or row.get("index") or row.get("time"), row)
+            for row in _frame_rows(frame)]
+
+
+def _bar_axis_label(label, row):
+    """The bar's ``stime`` spelling, or None when there is no usable one.
+
+    A frame indexed 0..n (positional, no dates) must not be turned into bars
+    stamped "0", "1", "2" -- that would be a fabricated time axis, which is
+    worse than the empty answer it replaced. None means "abandon".
+    """
+    for candidate in (row.get("stime"), label, row.get("time")):
+        text = str(candidate if candidate is not None else "")
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 8:
+            return text
+    return None
+
+
+def _leading_synthetic_bars(rows):
+    """How many leading rows are QMT's count-padding rather than real bars.
+
+    Asked for more bars than it has, the rescue's servant does not return
+    fewer -- it pads the HEAD to reach ``count`` with rows carrying the first
+    real bar's price in all four OHLC slots and zero volume/amount. Measured
+    on 600519.SH 1y count=10: seven rows stamped 20171231..20231231, every one
+    of them ``open=high=low=close=1524.0, volume=0, amount=0`` -- 1524.0 being
+    the close of the first real (2024) bar. Moutai did not trade at 1524 in
+    2017.
+
+    Dropping them is what makes the fallback faithful, not a guess: with the
+    pad removed the answer is identical row-for-row to what the primary path
+    returns on a terminal where the primary works (verified for 600519.SH and
+    000001.SZ across 1w/1d/1mon/1q/1hy/1y, and for 1mon count=200 where the
+    primary has 26 bars and the rescue padded to 200).
+
+    A genuinely zero-volume monthly/quarterly/yearly bar (a security suspended
+    for the whole period) at the HEAD of the window is dropped too. It carries
+    no price information -- all four prices are the carried-forward previous
+    close -- and this runs only in the rescue path, where the alternative is
+    zero rows. The caller narrows it further by only trimming when the answer
+    actually reached ``count``: padding exists only to reach it, so a short
+    answer was never padded and must not be trimmed.
+
+    Deliberately NOT tightened to "must equal the first real close": under
+    ``dividend_type != none`` the pads come back scaled per date, so they stay
+    ``o == h == l == c`` while no longer matching any single close. The
+    tightened test would let exactly those through.
+    """
+    count = 0
+    for row in rows:
+        volume = _float_or_none(row.get("volume"))
+        amount = _float_or_none(row.get("amount"))
+        open_ = _float_or_none(row.get("open"))
+        high = _float_or_none(row.get("high"))
+        low = _float_or_none(row.get("low"))
+        close = _float_or_none(row.get("close"))
+        if None in (volume, amount, open_, high, low, close):
+            break
+        if volume != 0 or amount != 0:
+            break
+        if not (open_ == high == low == close):
+            break
+        count += 1
+    return count
 
 
 _NATIVE_XTDATA = None  # cached native xtdata SDK module (None = not yet tried)
@@ -498,6 +715,7 @@ class BigQmtMarketDataProvider:
         get_trading_dates cost 2.1s per call forever (issue #160).
         """
         module = self._native()
+        native_error = None
         if module is not None and not self._native_known_dead(func_name):
             fn = getattr(module, func_name, None)
             if fn is not None:
@@ -505,27 +723,49 @@ class BigQmtMarketDataProvider:
                     result = fn(*args, **kwargs)
                     self._native_dead_marks().pop(func_name, None)
                     return result
-                except Exception:
+                except Exception as exc:
                     # Big QMT path: SDK present but no quote service to talk
                     # to ("无法连接行情服务"). Don't crash — let the ContextInfo
                     # fallback have a turn.
+                    native_error = exc
                     self._native_dead_marks()[func_name] = time.time()
-        return context_caller()
+        try:
+            return context_caller()
+        except Exception as context_error:
+            if native_error is not None:
+                # Both paths failed: the SDK's own reason (e.g. "无法连接行情服务"
+                # when miniQMT is down) is the actionable one, and it must not be
+                # buried under ContextInfo's bare NotImplementedError (#277).
+                raise RuntimeError(
+                    "%s failed on both paths: SDK %s: %s | ContextInfo %s: %s"
+                    % (func_name, native_error.__class__.__name__, native_error,
+                       context_error.__class__.__name__, context_error))
+            raise
 
-    def _call_first_supported(self, shapes):
+    def _call_first_supported_named(self, shapes):
+        """``(method_name, args, kwargs, result)`` for the shape that bound.
+
+        Which shape won is not bookkeeping: the shapes list spans several
+        ContextInfo methods with different signatures, so "what answered" and
+        "which of my arguments reached the terminal" are only knowable here.
+        #237's rescue reports both to the caller.
+        """
         last_error = None
         for method_name, args, kwargs in shapes:
             method = getattr(self.context_info, method_name, None)
             if method is None:
                 continue
             try:
-                return method(*args, **kwargs)
+                return method_name, args, kwargs, method(*args, **kwargs)
             except TypeError as exc:
                 last_error = exc
                 continue
         if last_error is not None:
             raise last_error
         raise NotImplementedError("none of the ContextInfo methods is available")
+
+    def _call_first_supported(self, shapes):
+        return self._call_first_supported_named(shapes)[3]
 
     def _market_data_shapes(self, method_name, **params):
         field_list = list(params.get("field_list") or params.get("fields") or [])
@@ -536,9 +776,6 @@ class BigQmtMarketDataProvider:
         count = params.get("count", -1)
         dividend_type = params.get("dividend_type", "none")
         fill_data = params.get("fill_data", True)
-        # Older callers omit ``subscribe``; explicit False is used by the
-        # host read-only path to force QMT's downloaded local cache.
-        subscribe = params.get("subscribe")
         data_dir = params.get("data_dir")
 
         mini_kwargs = {
@@ -560,9 +797,6 @@ class BigQmtMarketDataProvider:
             "count": count,
             "dividend_type": dividend_type,
         }
-        if subscribe is not None:
-            mini_kwargs["subscribe"] = bool(subscribe)
-            big_kwargs["subscribe"] = bool(subscribe)
         if method_name == "get_local_data" and data_dir is not None:
             mini_kwargs["data_dir"] = data_dir
             big_kwargs["data_dir"] = data_dir
@@ -573,8 +807,6 @@ class BigQmtMarketDataProvider:
             "count": count,
             "dividend_type": dividend_type,
         }
-        if subscribe is not None:
-            positional_tail_kwargs["subscribe"] = bool(subscribe)
         if method_name == "get_local_data" and data_dir is not None:
             positional_tail_kwargs["data_dir"] = data_dir
 
@@ -593,14 +825,18 @@ class BigQmtMarketDataProvider:
         big_kwargs_filled = dict(big_kwargs, fill_data=fill_data)
         positional_tail_filled = dict(positional_tail_kwargs, fill_data=fill_data)
 
-        positional_with_subscribe = None
+        # subscribe 是 QMT 签名的最后一个参数（fill_data 之后）：True（大 QMT
+        # 默认）把查过的标的塞进常驻内存订阅池，批量拉分钟线时终端内存单调涨到
+        # 崩溃（#361）；False 只读本地已下载数据。和 fill_data 一样单独成
+        # shape、只在调用方给了才传——签名没有 subscribe 的终端 TypeError 后
+        # 仍落到下面的裸 shape。
+        subscribe = params.get("subscribe")
+        shapes = []
         if subscribe is not None:
-            positional_with_subscribe = (
-                field_list, stock_list, period, start_time, end_time, count,
-                dividend_type, fill_data, bool(subscribe),
-            )
+            shapes.append(
+                (method_name, (), dict(big_kwargs_filled, subscribe=bool(subscribe))))
 
-        shapes = [
+        shapes.extend([
             (method_name, (), big_kwargs_filled),
             (method_name, (), big_kwargs),
             (method_name, (), mini_kwargs),
@@ -636,11 +872,7 @@ class BigQmtMarketDataProvider:
                     "fill_data": fill_data,
                 },
             ),
-        ]
-        if positional_with_subscribe is not None:
-            # Prefer the full Big QMT signature, while retaining the legacy
-            # candidates above for older terminal builds.
-            shapes.insert(3, (method_name, positional_with_subscribe, {}))
+        ])
         return shapes
 
     def _sector_codes(self, sector):
@@ -724,6 +956,11 @@ class BigQmtMarketDataProvider:
         """
         requested = list(codes or [])
         normalized_codes = [normalize_market_or_stock_code(code) for code in requested]
+        # What the caller asked for, tokens still tokens: this is what gets
+        # subscribed if the terminal answers only subscribed codes (#310). The
+        # expanded stock listing below is the wrong unit for that -- one
+        # whole-quote subscription on "SH" covers it.
+        subscribe_targets = list(normalized_codes)
         # Default to stocks. A market token lists every instrument the exchange
         # carries and stocks are 8.7% of it, so the old default made everyone pay
         # 7.5s for a 0.9s answer. types=["all"] restores the full listing.
@@ -746,6 +983,7 @@ class BigQmtMarketDataProvider:
         data = self.context_info.get_full_tick(normalized_codes) or {}
         if not isinstance(data, dict):
             return data or {}
+        data = self._recover_unsubscribed_ticks(subscribe_targets, normalized_codes, data)
 
         # Full Big-QMT 2.1.19.0 can return no entry from get_full_tick for an
         # explicitly requested .SHO/.SZO contract even while its tick stream is
@@ -800,6 +1038,153 @@ class BigQmtMarketDataProvider:
             (original_by_upper.get(str(key).upper(), key), value)
             for key, value in data.items()
         )
+
+    # Issue #310: on Jianghai big-QMT 2.1.19.0, ContextInfo.get_full_tick
+    # answers only codes that hold a live quote subscription. An unsubscribed
+    # code yields no entry -- not an error -- so a ticking terminal returned {}
+    # for every explicit code and for whole-market tokens alike, while ping,
+    # positions and get_market_data_ex were all fine. subscribe_whole_quote on
+    # the code and asking again a few seconds later produced the full
+    # five-level book. Guojin's build answers unsubscribed codes, so this path
+    # only runs when the native call left a requested code unanswered: a
+    # terminal that never does that never subscribes anything here.
+    #
+    # Subscriptions are held per request batch and dropped after
+    # TICK_SUBSCRIBE_IDLE_SECONDS without a get_full_tick that touched them;
+    # pruning happens on the next get_ticks call and, when the strategy loop
+    # wires it, from prune_tick_subscriptions on every adjust tick.
+    TICK_SUBSCRIBE_WAIT_SECONDS = 2.0
+    TICK_SUBSCRIBE_POLL_SECONDS = 0.1
+    TICK_SUBSCRIBE_IDLE_SECONDS = 300.0
+
+    def _tick_subscription_state(self):
+        state = getattr(self, "_tick_subscription_state_dict", None)
+        if state is None:
+            import threading
+            state = self._tick_subscription_state_dict = {
+                "lock": threading.RLock(),
+                "groups": [],        # [handle, set(codes), last_used]
+                "by_code": {},       # code -> group
+            }
+        return state
+
+    @staticmethod
+    def _tick_unanswered(targets, data):
+        """Requested codes the snapshot has no entry for. A market token counts
+        as answered when any key carries its suffix."""
+        answered = {str(key).upper() for key in (data or {})}
+        missing = []
+        for code in targets:
+            text = str(code)
+            if text in EXCHANGE_TOKENS:
+                suffix = "." + text
+                if not any(key.endswith(suffix) for key in answered):
+                    missing.append(text)
+            elif text.upper() not in answered:
+                missing.append(text)
+        return missing
+
+    def tick_subscription_status(self):
+        """Read-only view of the #310 warm-up subscriptions, for diagnostics."""
+        state = self._tick_subscription_state()
+        now = time.monotonic()
+        with state["lock"]:
+            return [
+                {"handle": handle, "codes": sorted(codes),
+                 "idle_seconds": round(now - last_used, 1)}
+                for handle, codes, last_used in state["groups"]
+            ]
+
+    def prune_tick_subscriptions(self, now=None):
+        """Unsubscribe warm-up groups idle longer than TICK_SUBSCRIBE_IDLE_SECONDS.
+        Returns the number of groups closed. Safe to call from the adjust loop."""
+        state = getattr(self, "_tick_subscription_state_dict", None)
+        if state is None:
+            return 0
+        now = time.monotonic() if now is None else now
+        idle = float(self.TICK_SUBSCRIBE_IDLE_SECONDS)
+        expired = []
+        with state["lock"]:
+            keep = []
+            for group in state["groups"]:
+                if now - group[2] > idle:
+                    expired.append(group)
+                    for code in group[1]:
+                        state["by_code"].pop(code, None)
+                else:
+                    keep.append(group)
+            state["groups"] = keep
+        unsubscribe = getattr(self.context_info, "unsubscribe_quote", None)
+        for handle, codes, _last_used in expired:
+            try:
+                if callable(unsubscribe):
+                    unsubscribe(handle)
+            except Exception as exc:
+                log.warning("full tick warm-up unsubscribe(%s) failed for %s: %s",
+                            handle, sorted(codes), exc)
+        return len(expired)
+
+    def _recover_unsubscribed_ticks(self, targets, query_codes, data):
+        """Subscribe the requested codes the snapshot left unanswered, then
+        re-read until they appear or TICK_SUBSCRIBE_WAIT_SECONDS elapses.
+
+        Only codes with no warm-up subscription yet are subscribed and waited
+        for. A code that is already subscribed and still unanswered is QMT's
+        answer (halted, delisted, pre-open) and is returned as such without
+        another wait, so a warm terminal pays nothing per call.
+        """
+        subscribe = getattr(self.context_info, "subscribe_whole_quote", None)
+        if not callable(subscribe):
+            return data
+        missing = self._tick_unanswered(targets, data)
+        state = self._tick_subscription_state()
+        now = time.monotonic()
+        self.prune_tick_subscriptions(now)
+        with state["lock"]:
+            by_code = state["by_code"]
+            for code in targets:
+                group = by_code.get(str(code))
+                if group is not None:
+                    group[2] = now
+            fresh = [code for code in missing if code not in by_code]
+        if not fresh:
+            return data
+        try:
+            handle = subscribe(list(fresh), callback=_ignore_tick_push)
+            value = int(handle)
+        except Exception as exc:
+            value = -1
+            handle = exc
+        if value <= 0:
+            if not getattr(self, "_tick_subscribe_warned", False):
+                self._tick_subscribe_warned = True
+                log.warning("full tick warm-up subscribe_whole_quote(%s) failed: %r",
+                            fresh, handle)
+            return data
+        with state["lock"]:
+            group = [value, set(fresh), now]
+            state["groups"].append(group)
+            for code in fresh:
+                state["by_code"][code] = group
+        deadline = now + float(self.TICK_SUBSCRIBE_WAIT_SECONDS)
+        poll = float(self.TICK_SUBSCRIBE_POLL_SECONDS)
+        while True:
+            time.sleep(poll)
+            retry = self.context_info.get_full_tick(query_codes) or {}
+            if isinstance(retry, dict) and retry:
+                merged = dict(data)
+                merged.update(retry)
+                data = merged
+                if not self._tick_unanswered(fresh, data):
+                    break
+            if time.monotonic() >= deadline:
+                break
+        still_missing = self._tick_unanswered(fresh, data)
+        log.info("full tick warm-up: subscribed %s (handle %s), %s after %.1fs",
+                 fresh, value,
+                 "all answered" if not still_missing else "still empty: %s" % still_missing,
+                 time.monotonic() - now)
+        return data
 
     def get_instrument(self, code):
         normalized = normalize_stock_code(code)
@@ -862,26 +1247,237 @@ class BigQmtMarketDataProvider:
     # columns" to QMT, and how a build expands that for synthesized periods is
     # not trustworthy. Retry once with the explicit K-line field list from the
     # terminal's own reference; an empty retry still means empty.
+    #
+    # Since #237 this tuple gates two things: the field retry above, and the
+    # get_local_data rescue below (which fires for an explicit field list too,
+    # because the broken build answers 0 for the 6-column list as well). Both
+    # stay off daily and intraday periods, where an empty answer is usually
+    # the truth.
     _SYNTH_PERIOD_FIELD_RETRY = ("1w", "1mon", "1q", "1hy", "1y")
     _KLINE_ALL_FIELDS = (
         "time", "open", "high", "low", "close", "volume", "amount",
         "settle", "openInterest", "preClose", "suspendFlag",
     )
 
+    # Warn at most once per period per this interval. The rescue below fires
+    # per call on an affected terminal, and a K-line poll is a per-second
+    # thing -- #139 is what one unthrottled line per call costs (the same
+    # message 373 times in QMT's own panel).
+    _SYNTH_FALLBACK_WARN_INTERVAL_SECONDS = 300.0
+
+    # Diagnostic request parameter (#237): skip the primary for a synthesized
+    # period and answer from the rescue alone. Read-only, ignored for every
+    # other period, and deliberately absent from the client's public
+    # xtdata.get_market_data_ex signature -- reachable through
+    # client.call("get_market_data_ex", {...}) / xtdata.call_method, which is
+    # where a diagnostic belongs.
+    SYNTH_RESCUE_ONLY_PARAM = "synth_fallback_only"
+
     def get_market_data_ex(self, **kwargs):
-        answer = self._get_market_data_ex_once(**kwargs)
         fields = kwargs.get("field_list") or kwargs.get("fields")
         period = str(kwargs.get("period") or "")
-        if (fields or period not in self._SYNTH_PERIOD_FIELD_RETRY
+        request = dict(kwargs)
+        rescue_only = _bool_flag(request.pop(self.SYNTH_RESCUE_ONLY_PARAM, None))
+
+        if rescue_only and period in self._SYNTH_PERIOD_FIELD_RETRY:
+            # Diagnostic bypass (#237). On a terminal where the primary works
+            # the rescue is unreachable by a normal request, so there is no
+            # way to show it behaves -- and an untested rescue is exactly the
+            # thing that ships broken. This skips the primary and answers
+            # straight from the rescue, so a maintainer can diff the two on a
+            # healthy build and the reporter can diff them on 2.0.8.0.
+            # Read-only, ignored for every other period.
+            rescued = self._synth_period_rescue(
+                request, fields, period, reason="synth_rescue_only")
+            if rescued is not None:
+                return rescued
+            # Deliberately NOT the primary's answer: this parameter exists to
+            # report on the rescue, and quietly substituting the primary would
+            # make a dead rescue look alive.
+            return _raw_market_data_payload(
+                {}, list(fields or _SYNTH_RESCUE_SERVED_FIELDS),
+                request.get("stock_list") or request.get("stock_code"))
+
+        answer = self._get_market_data_ex_once(**request)
+        if (period not in self._SYNTH_PERIOD_FIELD_RETRY
                 or not _market_data_answer_empty(answer)):
             return answer
-        retry = dict(kwargs)
-        retry.pop("fields", None)
-        retry["field_list"] = list(self._KLINE_ALL_FIELDS)
-        retried = self._get_market_data_ex_once(**retry)
-        # The retry is a strict improvement only when it found rows; otherwise
-        # keep the original (empty) answer, so "no data" stays "no data".
-        return retried if not _market_data_answer_empty(retried) else answer
+        if not fields:
+            retry = dict(request)
+            retry.pop("fields", None)
+            retry["field_list"] = list(self._KLINE_ALL_FIELDS)
+            retried = self._get_market_data_ex_once(**retry)
+            # The retry is a strict improvement only when it found rows;
+            # otherwise keep going, so "no data" stays "no data".
+            if not _market_data_answer_empty(retried):
+                return retried
+        rescued = self._synth_period_rescue(
+            request, fields, period, reason="synth_period_primary_empty")
+        return answer if rescued is None else rescued
+
+    def _synth_period_rescue(self, kwargs, fields, period, reason):
+        """Bars for a synthesized period when the primary path has none (#237).
+
+        Guojin terminal build **2.0.8.0** answers 0 rows for 1mon/1q/1hy/1y on
+        every ContextInfo path that goes through the C++
+        ``context.get_market_data2`` -- ``get_market_data_ex``,
+        ``get_market_data_ex_ori``, empty field_list, the 6-column list and the
+        11-column #219 retry alike -- while a plain
+        ``ContextInfo.get_market_data`` on the SAME process and the SAME bars
+        answers 10 rows. 1w and 1d are fine there, and build 2.1.19.0 is fine
+        on every period, so this is one build's synthesis path, not missing
+        data.
+
+        Reached through ``self.get_local_data``, but **served** by
+        ``ContextInfo.get_market_data`` on a Guojin terminal: the terminal's
+        own ``get_local_data`` takes no field list, so every get_local_data
+        shape raises TypeError and the get_market_data shapes appended after
+        them are what bind. The marker below reports which one actually
+        answered rather than assuming.
+
+        Deliberately narrow:
+
+        * only the synthesized periods. An empty daily/minute answer is
+          usually truthful, and a second RPC per empty call is not free.
+        * only after the primary and the #219 retry have both come up empty
+          (or when the caller explicitly asked for the rescue alone).
+        * **one code per call.** Asked for several codes at once the servant
+          answers with a ``pandas.Panel`` (QMT ships pandas 0.22); asked for
+          one it answers a bare ``DataFrame``. Looping keeps every call on the
+          single-code branch, which is the shape this code reads. Asking for
+          many at once is how this rescue was dead code for its whole first
+          draft: the answer was not a dict, and a ``not isinstance(local,
+          dict)`` guard threw every rescued row away.
+        * the servant serves 6 of the 11 columns (see
+          ``_SYNTH_RESCUE_SERVED_FIELDS``), so a request for all fields comes
+          back with OHLCV only, and ``fill_data`` does not reach it at all --
+          its signature has ``skip_paused`` instead. Both are disclosed: in
+          the ``__bigqmt_partial__`` marker on the answer, and in the operator
+          WARNING.
+        * a caller who asked only for columns the servant cannot serve gets
+          the honest empty answer back, not a differently-shaped one.
+
+        Returns None when nothing was rescued, so the caller keeps the
+        original answer.
+        """
+        requested = [str(field) for field in (fields or [])]
+        if requested:
+            served = [field for field in requested
+                      if field in _SYNTH_RESCUE_SERVED_FIELDS]
+            if not served:
+                return None
+        else:
+            served = list(_SYNTH_RESCUE_SERVED_FIELDS)
+        missing = [field for field in requested if field not in served]
+
+        codes = [str(code) for code in _as_list(
+            kwargs.get("stock_list") or kwargs.get("stock_code"))]
+        if not codes:
+            return None
+        count = _int_or_default(kwargs.get("count"), -1)
+
+        base = dict(kwargs)
+        base.pop("fields", None)
+        base.pop("stock_code", None)
+        # Always ask for the full OHLCV set even when the caller wanted fewer:
+        # spotting the count-padding needs volume/amount and all four prices.
+        base["field_list"] = list(_SYNTH_RESCUE_SERVED_FIELDS)
+
+        records = {}
+        trimmed = 0
+        servant = ""
+        fill_data_delivered = True
+        for code in codes:
+            probe = dict(base)
+            probe["stock_list"] = [code]
+            try:
+                name, args, sent, answer = self._call_first_supported_named(
+                    self._local_bar_shapes(**probe))
+            except Exception as exc:
+                self._warn_synth_fallback(
+                    period, "the local-bar path raised: %s: %s"
+                    % (type(exc).__name__, exc))
+                return None
+            servant = name
+            if "fill_data" not in sent and len(args) < 8:
+                fill_data_delivered = False
+            pairs = _frame_axis_rows(_single_code_frame(answer, code))
+            # Padding exists only to reach ``count``: an answer that fell
+            # short of it was never padded, so trimming its head would drop
+            # real bars. Verified live -- 1y count=10 comes back as exactly 10
+            # rows, 7 of them pad.
+            #
+            # A date window (count=-1 with a start_time) is padded the same
+            # way when the window starts before the terminal's local coverage
+            # (#335: 601318.SH 1mon from 20250901 with 1d data anchored at
+            # 2025-12-10 -- three head rows flat at 68.40, the first real
+            # close, zero turnover; MiniQMT returns no rows for those months).
+            # There is no count to fall short of, so every leading flat
+            # zero-turnover row at the head of a window is pad. The servant
+            # is called with its default skip_paused=True, so a genuinely
+            # suspended period does not come back as a row here in the first
+            # place -- the only flat zero-turnover rows it produces are pad.
+            window_request = count <= 0 and bool(str(kwargs.get("start_time") or "").strip())
+            if (count > 0 and len(pairs) >= count) or window_request:
+                pad = _leading_synthetic_bars([row for _label, row in pairs])
+                if pad:
+                    trimmed += pad
+                    pairs = pairs[pad:]
+            rows = []
+            for label, row in pairs:
+                stime = _bar_axis_label(label, row)
+                if stime is None:
+                    # No usable time axis: refuse rather than stamp bars with
+                    # positional labels.
+                    self._warn_synth_fallback(
+                        period, "the local-bar path answered %d row(s) for %s "
+                        "with no usable time axis; keeping the empty answer"
+                        % (len(pairs), code))
+                    return None
+                rows.append([stime] + [row.get(name) for name in served])
+            records[str(code)] = rows
+
+        if not any(records.values()):
+            return None
+        partial = {
+            "reason": reason,
+            "period": period,
+            "source": "ContextInfo.%s" % servant,
+            "requested": list(requested),
+            "served": list(served),
+            "missing": list(missing),
+            "fill_data_dropped": not fill_data_delivered,
+            "padding_rows_dropped": trimmed,
+        }
+        self._warn_synth_fallback(
+            period,
+            "%s; ContextInfo.%s rescued %d row(s) for %s (columns served: %s; "
+            "requested: %s; missing: %s; dropped %d count-padding row(s)%s). "
+            "Known on Guojin terminal build 2.0.8.0 -- check resource/version"
+            % ("the caller asked for the rescue only"
+               if reason == "synth_rescue_only"
+               else "primary get_market_data2 path answered 0 rows",
+               servant, sum(len(rows) for rows in records.values()),
+               ",".join(sorted(records)), ",".join(served),
+               ",".join(requested) if requested else "<all fields>",
+               ",".join(missing) if missing else "-", trimmed,
+               "; fill_data did not reach the terminal, ContextInfo."
+               "get_market_data takes skip_paused instead"
+               if not fill_data_delivered else ""))
+        return _raw_market_data_payload(
+            records, served,
+            kwargs.get("stock_list") or kwargs.get("stock_code"),
+            partial=partial)
+
+    def _warn_synth_fallback(self, period, message):
+        seen = getattr(self, "_synth_fallback_warned_at", None)
+        if seen is None:
+            seen = self._synth_fallback_warned_at = {}
+        now = time.time()
+        if now - seen.get(period, 0.0) < self._SYNTH_FALLBACK_WARN_INTERVAL_SECONDS:
+            return
+        seen[period] = now
+        log.warning("[bigqmt_synth_fallback] period=%s: %s", period, message)
 
     def _get_market_data_ex_once(self, **kwargs):
         raw_method = getattr(self.context_info, "get_market_data_ex_ori", None)
@@ -899,11 +1495,22 @@ class BigQmtMarketDataProvider:
             shapes.extend(self._market_data_shapes("get_market_data", **kwargs))
         return self._call_first_supported(shapes)
 
-    def get_local_data(self, **kwargs):
+    def _local_bar_shapes(self, **kwargs):
+        """Call shapes for "read bars without going through get_market_data2".
+
+        The get_market_data shapes are not a garnish. On a Guojin terminal
+        ContextInfo.get_local_data takes no field list at all, so every
+        get_local_data shape raises TypeError and one of these is what
+        actually answers -- which is why #237's rescue asks
+        _call_first_supported_named which one it was.
+        """
         shapes = self._market_data_shapes("get_local_data", **kwargs)
         if hasattr(self.context_info, "get_market_data"):
             shapes.extend(self._market_data_shapes("get_market_data", **kwargs))
-        return self._call_first_supported(shapes)
+        return shapes
+
+    def get_local_data(self, **kwargs):
+        return self._call_first_supported(self._local_bar_shapes(**kwargs))
 
     # Probing more than this many candidate ex-dividend days in one range
     # request is a sign the filter did not narrow anything (a code with no
@@ -951,11 +1558,8 @@ class BigQmtMarketDataProvider:
                 answer = shape()
             except Exception:
                 continue
-            if _factor_answer_has_rows(answer):
-                # Preserve the native shape.  The RPC serializer already
-                # knows how to encode dict/DataFrame factor answers; coercing
-                # a DataFrame through ``dict`` raises or corrupts its rows.
-                return answer
+            if answer:
+                return dict(answer)
 
         return self._expand_divid_factors(stock_code, start, end)
 
@@ -1071,19 +1675,8 @@ class BigQmtMarketDataProvider:
                 answer = self._call_context("get_divid_factors", stock_code, day)
             except Exception:
                 continue
-            if _factor_answer_has_rows(answer):
-                if isinstance(answer, dict):
-                    merged.update(answer)
-                elif hasattr(answer, "to_dict"):
-                    # A single-date DataFrame is uncommon, but converting it
-                    # to records keeps the range response JSON-safe without
-                    # relying on DataFrame truthiness.
-                    try:
-                        records = answer.to_dict("records")
-                        for index, record in enumerate(records):
-                            merged["%s#%d" % (day, index)] = record
-                    except Exception:
-                        continue
+            if answer:
+                merged.update(answer)
         return merged
 
     def _download(self, func_name, sdk_args, sdk_kwargs, ctx_call):
@@ -1274,16 +1867,159 @@ class BigQmtMarketDataProvider:
             "download_financial_data2", _via_context, stock_list, table_list or [], start_time, end_time
         )
 
+    # The financial download probe (#277). One code, one table, a ~30-day
+    # window: small enough that a working service answers in well under a
+    # second, real enough that "the function exists" and "a download actually
+    # happens" come apart.
+    DOWNLOAD_PROBE_STOCK = "000001.SZ"
+    DOWNLOAD_PROBE_TABLE = "Capital"
+    DOWNLOAD_PROBE_WINDOW_DAYS = 30
+    _DOWNLOAD_PROBE_FUNCS = ("download_financial_data", "download_financial_data2")
+
+    def probe_download_channels(self, dial=True):
+        """Tell "download API exposed" apart from "standalone update usable".
+
+        probe_capabilities used to list ``download_financial_data`` as
+        available whenever the function existed. On a Big QMT terminal whose
+        miniQMT (the 58610 xtdata service) is not running, that is exactly the
+        case that misleads (#277): the SDK function is there and callable, the
+        existing financial rows read back fine, and the download itself dies
+        with ``无法连接行情服务`` -- a reporter with a full financial library
+        and no way to refresh it. "Exists" was answering the wrong question.
+
+        So this makes one real, tiny SDK download call and reports what it
+        did. Both download functions sit on the same data service, so the dial
+        is made once (through ``download_financial_data``) and the verdict is
+        shared; a second multi-second failure would prove nothing new. The
+        dial deliberately bypasses the ``_native_dead_marks`` cache: a cached
+        failure is the memory of an earlier dial, and the probe's job is to
+        measure now. It does update the cache afterwards, so a real caller
+        arriving next does not pay the timeout again.
+
+        The read-back through ``get_financial_data`` is reported under its own
+        key precisely because it proves something different: rows already on
+        disk are readable, which says nothing about whether they can be
+        updated. That distinction is the whole point of the probe.
+        """
+        report = {
+            "probe_call": {
+                "stock_list": [self.DOWNLOAD_PROBE_STOCK],
+                "table_list": [self.DOWNLOAD_PROBE_TABLE],
+            },
+            "functions": {},
+            "sdk_call": {"attempted": False},
+            "readback_existing_rows": {},
+        }
+        today = _dt.date.today()
+        start = today - _dt.timedelta(days=self.DOWNLOAD_PROBE_WINDOW_DAYS)
+        report["probe_call"]["start_time"] = start.strftime("%Y%m%d")
+        report["probe_call"]["end_time"] = today.strftime("%Y%m%d")
+
+        try:
+            module = self._native()
+        except Exception as exc:
+            module = None
+            report["native_xtdata_error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        report["native_xtdata_loaded"] = module is not None
+        context_info = getattr(self, "context_info", None)
+        for name in self._DOWNLOAD_PROBE_FUNCS:
+            report["functions"][name] = {
+                "sdk_exposed": callable(getattr(module, name, None)),
+                "contextinfo_exposed": callable(getattr(context_info, name, None)),
+            }
+
+        dial_name = self._DOWNLOAD_PROBE_FUNCS[0]
+        dial_fn = getattr(module, dial_name, None) if module is not None else None
+        if not callable(dial_fn):
+            report["sdk_call"]["reason"] = "%s is not exposed by the native xtdata SDK" % dial_name
+        elif not dial:
+            report["sdk_call"]["reason"] = "skipped on request (download_probe=false)"
+        else:
+            started = time.time()
+            call = {"attempted": True, "function": dial_name}
+            try:
+                dial_fn(stock_list=[self.DOWNLOAD_PROBE_STOCK],
+                        table_list=[self.DOWNLOAD_PROBE_TABLE],
+                        start_time=report["probe_call"]["start_time"],
+                        end_time=report["probe_call"]["end_time"])
+                call["ok"] = True
+                self._native_dead_marks().pop(dial_name, None)
+            except Exception as exc:
+                call["ok"] = False
+                call["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+                self._native_dead_marks()[dial_name] = time.time()
+            call["seconds"] = round(time.time() - started, 3)
+            report["sdk_call"] = call
+
+        # Existing rows: readable is not the same as updatable, hence the key.
+        readback = {"note": "rows already on disk being readable does not mean they can be updated"}
+        try:
+            rows = self.get_financial_data(
+                [self.DOWNLOAD_PROBE_STOCK], [self.DOWNLOAD_PROBE_TABLE],
+                report["probe_call"]["start_time"], report["probe_call"]["end_time"])
+            readback["ok"] = True
+            readback["rows"] = self._count_probe_rows(rows)
+        except Exception as exc:
+            readback["ok"] = False
+            readback["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        report["readback_existing_rows"] = readback
+
+        sdk_call = report["sdk_call"]
+        for name, entry in report["functions"].items():
+            if not entry["sdk_exposed"] and not entry["contextinfo_exposed"]:
+                entry["verdict"] = "not_exposed"
+            elif not entry["sdk_exposed"]:
+                # ContextInfo has never had these on a Big QMT terminal; if a
+                # broker build does, nothing here exercised it.
+                entry["verdict"] = "contextinfo_only_untested"
+            elif not sdk_call.get("attempted"):
+                entry["verdict"] = "exposed_untested"
+            elif sdk_call.get("ok"):
+                entry["verdict"] = "update_usable"
+            else:
+                entry["verdict"] = "exposed_but_service_unreachable"
+        return report
+
+    @staticmethod
+    def _count_probe_rows(rows):
+        """Row count for whatever get_financial_data answered with.
+
+        Big QMT answers a Series / DataFrame / Panel depending on how many
+        codes and dates were asked for; the probe asks for one code over a
+        window, so a DataFrame is the usual shape and ``len`` is its row
+        count. ``empty`` catches a DataFrame that has columns and no rows.
+        """
+        if rows is None:
+            return 0
+        if getattr(rows, "empty", False) is True:
+            return 0
+        try:
+            return len(rows)
+        except TypeError:
+            return 1
+
     # Well-known sector names that Big QMT's ContextInfo recognises for
     # get_stock_list_in_sector / get_sector. Used as a fallback when the full
     # sector list is not enumerable (Big QMT has no get_sector_list method and
     # the xtdata SDK's quote service is unreachable inside the full terminal).
+    #
+    # Every name here was fed to get_stock_list_in_sector on a live 国金 Big
+    # QMT 2.1.19.0 terminal (2026-09-11). Two of the original thirteen came
+    # back empty and are corrected below: the A-share halves are spelt 上证 /
+    # 深证 on this terminal, while 沪市A股 / 深市A股 return 0 rows. Funds go
+    # the other way -- 沪市基金 / 深市基金 answer and 上证基金 / 深证基金 do
+    # not -- so the spelling cannot be inferred, only measured. 中金所 also
+    # returned 0 on a STOCK account, which reads as a permission gap rather
+    # than a wrong name, so it stays.
     _FALLBACK_SECTORS = (
-        "沪深A股", "沪市A股", "深市A股", "科创板", "创业板",
+        "沪深A股", "上证A股", "深证A股", "科创板", "创业板",
         "上证期权", "深证期权", "中金所",
         "沪市债券", "深市债券",
         "沪市基金", "深市基金", "沪深ETF",
     )
+    # The two spellings that look right and answer with nothing. Kept so a
+    # test can pin that they never creep back into the list above.
+    _EMPTY_ON_BIG_QMT = ("沪市A股", "深市A股")
 
     def get_sector_list(self, allow_fallback=False):
         """Return the terminal's sector names, or say it cannot (issue #143).
@@ -1491,8 +2227,65 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_option_iv", opt_code)
 
     def get_option_detail_data(self, stockcode):
-        # ContextInfo stub: get_option_detail_data(stockcode)
-        return self._call_context("get_option_detail_data", stockcode)
+        # ContextInfo returns fewer fields than miniQMT's xtdata wrapper. Fill
+        # the deterministic compatibility fields without inventing TradingDay.
+        raw = self._call_context("get_option_detail_data", stockcode)
+        if not raw:
+            return raw
+        detail = dict(raw)
+
+        if not detail.get("InstrumentName"):
+            try:
+                instrument = self.get_instrument(stockcode)
+            except Exception:
+                instrument = {}
+            name = instrument.get("InstrumentName") if instrument else None
+            if name:
+                detail["InstrumentName"] = name
+
+        underlying_code = detail.get("OptUndlCode")
+        underlying_market = detail.get("OptUndlMarket")
+        if (not detail.get("OptUndlCodeFull") and underlying_code
+                and underlying_market):
+            detail["OptUndlCodeFull"] = "%s.%s" % (
+                underlying_code, str(underlying_market).upper())
+
+        if not detail.get("ProductCode"):
+            product_id = str(detail.get("ProductID") or "")
+            exchange_id = str(detail.get("ExchangeID") or "").upper()
+            if product_id.endswith("_o") and underlying_market:
+                detail["ProductCode"] = "%s.%s" % (
+                    product_id[:-2], str(underlying_market).upper())
+            elif exchange_id in ("ZF", "CZCE") and product_id and underlying_market:
+                detail["ProductCode"] = "%s.%s" % (
+                    product_id[:-1], str(underlying_market).upper())
+            elif detail.get("OptUndlCodeFull"):
+                detail["ProductCode"] = detail["OptUndlCodeFull"]
+        return detail
+
+    def get_option_detail_data_batch(self, stockcodes):
+        """Return option details for many contracts in one bridge request.
+
+        ContextInfo only exposes the single-contract API, so the QMT-side
+        adapter deliberately performs the loop here.  One bad contract must
+        not discard the other results; failed or empty details are represented
+        by an empty dict under the original contract code.
+        """
+        if isinstance(stockcodes, (str, bytes)) or not isinstance(
+                stockcodes, (list, tuple)):
+            raise ValueError("stockcodes must be a list or tuple")
+
+        details = {}
+        for value in stockcodes:
+            code = str(value or "").strip()
+            if not code or code in details:
+                continue
+            try:
+                details[code] = self.get_option_detail_data(code) or {}
+            except Exception as exc:
+                log.warning("get_option_detail_data failed for %s: %s", code, exc)
+                details[code] = {}
+        return details
 
     def get_option_undl_data(self, undl_code_ref=""):
         # ContextInfo stub: get_option_undl_data(undl_code_ref='') — 标的下所有期权。
@@ -1763,7 +2556,9 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_last_close", stock)
 
     def get_last_volume(self, stock):
-        # ContextInfo stub: get_last_volume(stock)
+        # ContextInfo stub: get_last_volume(stock) — 最新**流通股本**，不是「昨量」。
+        # 实测 601398.SH -> 269612212539.0，= get_instrument_detail 的 FloatVolume；
+        # 同一天成交量 2154432 手，差五个数量级（#262）。
         return self._call_context("get_last_volume", stock)
 
     def get_open_date(self, stock):
@@ -1779,7 +2574,9 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_contract_multiplier", stockcode)
 
     def get_float_caps(self, stockcode):
-        # ContextInfo stub: get_float_caps(stockcode) — 流通市值。
+        # ContextInfo stub: get_float_caps(stockcode) — 流通**股本（股数）**，不是流通市值。
+        # 实测与 get_last_volume / FloatVolume 逐位相同（601398.SH -> 269612212539），
+        # 当市值用会差一个价格的倍数（#262）。
         return self._call_context("get_float_caps", stockcode)
 
     def get_total_share(self, stockcode):
@@ -1795,11 +2592,17 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_weight_in_index", mtkindexcode, stockcode)
 
     def get_svol(self, stock):
-        # ContextInfo stub: get_svol(stock)
+        # ContextInfo stub: get_svol(stock) — 内盘，盘中窗口量不是当日累计。
+        # svol + bvol 不等于当日成交量（#262）。它等于最后一根 1 分钟 K 线的
+        # 成交量，只在尾盘活动只剩 15:00 集合竞价的代码上成立（601398.SH
+        # 32586、511990.SH 22883）；连续交易到 15:30 的逆回购上两者对不上
+        # （204001.SH 44733734 vs 末根 5565745），所以只能说这是一个盘中窗口
+        # 的量，窗口具体多长没能定死。详见 xtquant_compat.get_svol 的实测记录。
         return self._call_context("get_svol", stock)
 
     def get_bvol(self, stock):
-        # ContextInfo stub: get_bvol(stock)
+        # ContextInfo stub: get_bvol(stock) — 外盘，语义同 get_svol。
+        # 股票收盘后答 0 是因为集合竞价整根落进内盘；逆回购（连续到 15:30）两侧都非零。
         return self._call_context("get_bvol", stock)
 
     def get_risk_free_rate(self, index=-1):

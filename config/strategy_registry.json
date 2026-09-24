@@ -54,7 +54,7 @@
         "startup_mode": "ISOLATE_NEW",
         "activation_signal_not_before": "20260911",
         "activation_note": "20260911 user approval: do not wait 20 shadow days; start a new 100,000 CNY simulation sleeve after the next completed close signal. Do not adopt virtual shadow fills or external broker holdings.",
-        "broker_order_authority": "SIMULATION_90000001_ONLY",
+        "broker_order_authority": "SIMULATION_SYNTHETIC_ACCOUNT_ONLY",
         "formal_execution": "FORBIDDEN"
       },
       "shadow_runtime": {

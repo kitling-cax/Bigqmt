@@ -37,7 +37,7 @@ def validate(path: Path) -> dict:
             if strategy.get("status") != "SIMULATION_ONLY":
                 errors.append(f"{prefix}.execution_enabled requires SIMULATION_ONLY status")
             if strategy.get("allowed_accounts") != ["90000001"]:
-                errors.append(f"{prefix}.execution_enabled requires only simulation account 90000001")
+                errors.append(f"{prefix}.execution_enabled requires the synthetic simulation account")
             if strategy.get("execution_mode") != "SIMULATION_AUTOMATED_QMT_BRIDGE":
                 errors.append(f"{prefix}.execution_mode is not the approved simulation bridge mode")
             activation = strategy.get("activation_policy")
