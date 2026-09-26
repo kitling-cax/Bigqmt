@@ -48,6 +48,8 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem windowsStartupItem;
     private static ToolStripMenuItem strategyPolicyItem;
     private static ToolStripMenuItem strategyPolicyMenu;
+    private static ContextMenuStrip strategyPolicyMenuContext;
+    private static bool statusRefreshRunning;
     private static MutexHandle mutex;
     private static Icon trayIcon;
     private static string bridgeState = "未探测（只读）";
@@ -119,6 +121,7 @@ internal static class BigQMTAccountTray
         Application.SetCompatibleTextRenderingDefault(false);
 
         ContextMenuStrip menu = new ContextMenuStrip();
+        strategyPolicyMenuContext = menu;
         statusItem = new ToolStripMenuItem(ProfileTitle + " " + Account + "：状态加载中");
         statusItem.Enabled = false;
         menu.Items.Add(statusItem);
@@ -174,7 +177,7 @@ internal static class BigQMTAccountTray
         }
         if (Profile == "simulation")
             menu.Items.Add("删除已安装策略（需要密码）", null, delegate { UninstallInstalledStrategies(); });
-        menu.Items.Add("刷新全部状态", null, delegate { RefreshStatus(); });
+        menu.Items.Add("刷新全部状态", null, delegate { QueueStatusRefresh(); });
         menu.Items.Add("锁定订单状态", null, delegate { LockReminder(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出托盘", null, delegate { Application.Exit(); });
@@ -205,7 +208,7 @@ internal static class BigQMTAccountTray
         RefreshStatus();
         Timer timer = new Timer();
         timer.Interval = 30000;
-        timer.Tick += delegate { RefreshStatus(); TryRunScheduler(); };
+        timer.Tick += delegate { TryRunScheduler(); QueueStatusRefresh(); };
         timer.Start();
         Application.Run();
     }
@@ -397,6 +400,28 @@ internal static class BigQMTAccountTray
             using (HttpWebResponse response = (HttpWebResponse)request.GetResponse()) return response.StatusCode == HttpStatusCode.OK;
         }
         catch { return false; }
+    }
+
+    private static void QueueStatusRefresh()
+    {
+        // Status probing is slow (a Python subprocess plus Coordinator/Redis
+        // RPC, worst case ~45 s).  Running it on the UI thread starves the
+        // NotifyIcon menu message loop: the popup freezes on open and
+        // blank-click dismissal never gets pumped.  Run one refresh at a time
+        // on a background thread; RefreshStatus only writes thread-safe
+        // ToolStripMenuItem.Text / NotifyIcon fields and marshals the one
+        // real control (strategy menu drop-down) itself.
+        lock (scheduleLock)
+        {
+            if (statusRefreshRunning) return;
+            statusRefreshRunning = true;
+        }
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            try { RefreshStatus(); }
+            catch (Exception error) { try { Audit("status_refresh_async_error", error.GetType().Name); } catch { } }
+            finally { lock (scheduleLock) { statusRefreshRunning = false; } }
+        });
     }
 
     private static void RefreshStatus()
@@ -1142,15 +1167,33 @@ internal static class BigQMTAccountTray
     private static void RebuildStrategyPolicyMenu()
     {
         if (Profile != "simulation" || strategyPolicyMenu == null) return;
-        System.Collections.Generic.List<string> ids = new System.Collections.Generic.List<string>();
-        bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
-        if (ok)
+        // Probe off the UI thread (uninstall --list can take ~15 s), then
+        // marshal the real control mutation onto the UI thread so the tray
+        // context menu is never blocked by it.
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
         {
-            // Collect installed strategy ids; an id that has no toggle keeps
-            // whatever policy state it had (no write, no delete of entries).
-            foreach (var entry in ParseInstalledEntries(listed))
-                if (!ids.Contains(entry["strategy_id"])) ids.Add(entry["strategy_id"]);
-        }
+            try
+            {
+                System.Collections.Generic.List<string> ids = new System.Collections.Generic.List<string>();
+                bool ok; string listed = RunPython("uninstall_strategy_package.py", "--list", 15000, out ok);
+                if (ok)
+                {
+                    // Collect installed strategy ids; an id that has no toggle
+                    // keeps whatever policy state it had (no write).
+                    foreach (var entry in ParseInstalledEntries(listed))
+                        if (!ids.Contains(entry["strategy_id"])) ids.Add(entry["strategy_id"]);
+                }
+                var ctx = strategyPolicyMenuContext;
+                if (ctx == null || !ctx.InvokeRequired) { ApplyPolicyMenu(ids); return; }
+                ctx.BeginInvoke(new System.Windows.Forms.MethodInvoker(delegate { ApplyPolicyMenu(ids); }));
+            }
+            catch { }
+        });
+    }
+
+    private static void ApplyPolicyMenu(System.Collections.Generic.List<string> ids)
+    {
+        if (Profile != "simulation" || strategyPolicyMenu == null) return;
         bool same = ids.Count == lastPolicyMenuIds.Count;
         if (same) for (int i = 0; i < ids.Count; i++) if (ids[i] != lastPolicyMenuIds[i]) { same = false; break; }
         if (same) return; // no change, avoid flicker
