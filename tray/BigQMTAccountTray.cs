@@ -50,6 +50,8 @@ internal static class BigQMTAccountTray
     private static ToolStripMenuItem strategyPolicyMenu;
     private static ContextMenuStrip strategyPolicyMenuContext;
     private static bool statusRefreshRunning;
+    private static ToolStripMenuItem qmtWatchdogItem;
+    private static bool qmtWatchdogEnabled = true;
     private static MutexHandle mutex;
     private static Icon trayIcon;
     private static string bridgeState = "未探测（只读）";
@@ -115,6 +117,7 @@ internal static class BigQMTAccountTray
     {
         LoadRuntimeNodeConfig();
         Account = LoadConfiguredAccount();
+        LoadQmtWatchdog();
         mutex = new MutexHandle("Local\\KitlingBigQMTNativeTray-" + Profile);
         if (!mutex.IsFirstInstance) return;
         Application.EnableVisualStyles();
@@ -140,6 +143,11 @@ internal static class BigQMTAccountTray
         ToolStripMenuItem services = new ToolStripMenuItem("服务管理");
         services.DropDownItems.Add("启动缺失的 QMT", null, delegate { StartQmt(false); });
         services.DropDownItems.Add("重启本账户 QMT", null, delegate { StartQmt(true); });
+        qmtWatchdogItem = new ToolStripMenuItem("QMT 登录自动恢复");
+        qmtWatchdogItem.Checked = qmtWatchdogEnabled;
+        qmtWatchdogItem.CheckOnClick = true;
+        qmtWatchdogItem.CheckedChanged += delegate { if (qmtWatchdogItem.Checked != qmtWatchdogEnabled) SetQmtWatchdog(qmtWatchdogItem.Checked); };
+        services.DropDownItems.Add(qmtWatchdogItem);
         services.DropDownItems.Add("启动缺失的 MiniQMT（免密）", null, delegate { StartMiniQmt(); });
         services.DropDownItems.Add("停止 MiniQMT（仅此账户）", null, delegate { StopMiniQmt(); });
         services.DropDownItems.Add("启动缺失的 Redis", null, delegate { StartRedis(); });
@@ -442,6 +450,7 @@ internal static class BigQMTAccountTray
         string detail = "Redis " + (redis ? "正常" : "不可达")
             + "｜看板 " + (dashboard ? "正常" : "不可达")
             + "｜" + snapshotFreshness
+            + "｜QMT看护 " + (qmtWatchdogEnabled ? "开" : "关")
             + "｜" + (Profile == "simulation"
                 ? (lastAuthorizationKeyState == "VALID" ? "模拟授权有效｜当前订单窗口关闭" : "模拟授权缺失｜订单锁定")
                 : "正式只读｜订单锁定");
@@ -731,9 +740,48 @@ internal static class BigQMTAccountTray
         return ok && output.IndexOf("\"status\":\"RUNNING\"") >= 0 ? "RUNNING" : "STOPPED";
     }
 
+    private static void LoadQmtWatchdog()
+    {
+        // Per-profile local switch: missing file keeps the compatible
+        // default (enabled).  The file stores only true/false, never secrets.
+        try
+        {
+            string path = Path.Combine(RootPath(), "runtime_data", "state", Profile, "qmt_auto_login_watchdog.json");
+            if (File.Exists(path))
+            {
+                string content = File.ReadAllText(path, Encoding.UTF8).Trim().ToLowerInvariant();
+                qmtWatchdogEnabled = content == "true";
+            }
+            else qmtWatchdogEnabled = true;
+        }
+        catch { qmtWatchdogEnabled = true; }
+    }
+
+    private static void SetQmtWatchdog(bool enabled)
+    {
+        qmtWatchdogEnabled = enabled;
+        try
+        {
+            string dir = Path.Combine(RootPath(), "runtime_data", "state", Profile);
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "qmt_auto_login_watchdog.json");
+            File.WriteAllText(path, enabled ? "true" : "false", new UTF8Encoding(false));
+            Audit("qmt_watchdog", enabled ? "enabled" : "disabled");
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show("QMT 自动恢复开关无法保存：\n" + error.Message, ProfileTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Audit("qmt_watchdog_error", error.GetType().Name + ": " + error.Message);
+        }
+    }
+
     private static void AutoStartMissingQmt(string qmt)
     {
-        if (qmt != "STOPPED" || DateTime.UtcNow < nextAutoQmtAttempt) return;
+        // Watchdog switch off -> never auto-launch this profile's QMT.  Only
+        // the tray's QMT recovery is gated; MiniQMT/Redis/Dashboard and the
+        // always-on order/read-only invariants are unaffected.  A running
+        // QMT is never stopped by toggling this.
+        if (!qmtWatchdogEnabled || qmt != "STOPPED" || DateTime.UtcNow < nextAutoQmtAttempt) return;
         nextAutoQmtAttempt = DateTime.UtcNow.AddMinutes(2);
         bool ok;
         string output = RunPython("qmt_launcher_cli.py", "open --profile " + Profile, 15000, out ok);
